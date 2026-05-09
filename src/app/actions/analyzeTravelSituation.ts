@@ -57,16 +57,27 @@ export async function analyzeTravelSituation(
   }
 
   try {
-    const client = new GoogleGenerativeAI(apiKey);
-    const model = client.getGenerativeModel({ model: "gemini-1.5-flash" });
-    const prompt = `${SYSTEM_PROMPT}\n\nInput:\n${JSON.stringify(input)}`;
-    const result = await model.generateContent(prompt);
-    const text = result.response.text();
-    const parsed = safeParse(text);
-    if (!parsed) {
-      return fallbackResult();
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
+    try {
+      const client = new GoogleGenerativeAI(apiKey);
+      const model = client.getGenerativeModel({ model: "gemini-1.5-flash" });
+      const prompt = `${SYSTEM_PROMPT}\n\nInput:\n${JSON.stringify(input)}`;
+      const result = await Promise.race([
+        model.generateContent(prompt),
+        new Promise<never>((_, reject) => {
+          controller.signal.addEventListener("abort", () => reject(new Error("Gemini timeout exceeded")), { once: true });
+        })
+      ]);
+      const text = result.response.text();
+      const parsed = safeParse(text);
+      if (!parsed) {
+        return fallbackResult();
+      }
+      return parsed;
+    } finally {
+      clearTimeout(timeoutId);
     }
-    return parsed;
   } catch {
     return fallbackResult();
   }

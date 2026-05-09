@@ -24,14 +24,15 @@ type DmiGeoJsonResponse = {
 
 export class WeatherService {
   private static readonly BASE_URL = "https://opendataapi.dmi.dk/v1/forecastedr/collections/harmonie_dini_sf/position";
-  private static readonly CACHE_TTL_MS = 5 * 60 * 1000;
-  private readonly cache = new Map<string, { snapshot: WeatherSnapshot; createdAt: number }>();
+  private static readonly SUCCESS_CACHE_TTL_MS = 5 * 60 * 1000;
+  private static readonly FALLBACK_CACHE_TTL_MS = 30 * 1000;
+  private readonly cache = new Map<string, { snapshot: WeatherSnapshot; createdAt: number; ttlMs: number }>();
 
   async getWeatherForPosition(lat: number, lng: number): Promise<WeatherSnapshot> {
     const cacheKey = this.getCacheKey(lat, lng);
     const nowMs = Date.now();
     const cacheHit = this.cache.get(cacheKey);
-    if (cacheHit && nowMs - cacheHit.createdAt < WeatherService.CACHE_TTL_MS) {
+    if (cacheHit && nowMs - cacheHit.createdAt < cacheHit.ttlMs) {
       return cacheHit.snapshot;
     }
 
@@ -77,7 +78,11 @@ export class WeatherService {
         precipitationMm: precipitation,
         summary: this.buildSummary(temperatureC, wind, precipitation)
       };
-      this.cache.set(cacheKey, { snapshot, createdAt: nowMs });
+      this.cache.set(cacheKey, {
+        snapshot,
+        createdAt: nowMs,
+        ttlMs: WeatherService.SUCCESS_CACHE_TTL_MS
+      });
 
       return snapshot;
     } catch {
@@ -86,7 +91,11 @@ export class WeatherService {
         lastUpdated: this.toHHMMUtc(new Date(nowMs)),
         summary: "DMI-vejr utilgængeligt. Falder tilbage til signaler fra trafikhændelser."
       };
-      this.cache.set(cacheKey, { snapshot: fallback, createdAt: nowMs });
+      this.cache.set(cacheKey, {
+        snapshot: fallback,
+        createdAt: nowMs,
+        ttlMs: WeatherService.FALLBACK_CACHE_TTL_MS
+      });
       return fallback;
     }
   }

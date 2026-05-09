@@ -5,11 +5,13 @@ import { GoogleMap, Marker, Polyline, useLoadScript } from "@react-google-maps/a
 
 export function LiveMapPanel({
   routeCoordinates,
+  liveVehicleCoordinate,
   currentPosition,
   scooterEnabled,
   unstable
 }: {
   routeCoordinates: Array<{ lat: number; lng: number; label: string }>;
+  liveVehicleCoordinate?: { lat: number; lng: number; label: string; estimated: boolean };
   currentPosition?: { lat: number; lng: number };
   scooterEnabled: boolean;
   unstable?: boolean;
@@ -23,12 +25,6 @@ export function LiveMapPanel({
     }
     return { lat: currentPosition?.lat ?? 55.6761, lng: currentPosition?.lng ?? 12.5683 };
   }, [currentPosition?.lat, currentPosition?.lng, routeCoordinates]);
-
-  const liveVehiclePosition = useMemo(() => {
-    if (routeCoordinates.length === 0) return undefined;
-    const idx = Math.floor((routeCoordinates.length - 1) * 0.5);
-    return routeCoordinates[idx];
-  }, [routeCoordinates]);
 
   const stableSegment = useMemo(
     () => (unstable ? routeCoordinates.slice(0, Math.max(2, Math.floor(routeCoordinates.length * 0.6))) : routeCoordinates),
@@ -73,7 +69,14 @@ export function LiveMapPanel({
           )}
           {routeCoordinates[0] && <Marker position={routeCoordinates[0]} label="A" />}
           {routeCoordinates.length > 1 && <Marker position={routeCoordinates[routeCoordinates.length - 1]} label="B" />}
-          {liveVehiclePosition && <Marker position={liveVehiclePosition} title="Live position" label="LIVE" />}
+          {liveVehicleCoordinate && (
+            <Marker
+              position={liveVehicleCoordinate}
+              title={liveVehicleCoordinate.estimated ? "Estimeret position" : "Live position"}
+              label={liveVehicleCoordinate.estimated ? "EST" : "LIVE"}
+              options={{ opacity: liveVehicleCoordinate.estimated ? 0.55 : 1 }}
+            />
+          )}
           {!routeCoordinates.length && currentPosition && <Marker position={currentPosition} title="Aktuel position" />}
         </GoogleMap>
       )}

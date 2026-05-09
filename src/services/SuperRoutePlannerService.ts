@@ -9,6 +9,9 @@ import { WeatherService } from "./WeatherService";
 import { InfrastructureMap } from "./InfrastructureMap";
 
 export class SuperRoutePlannerService {
+  private lastSuccessfulPlan?: PlannerResult;
+  private lastSuccessfulAtMs?: number;
+
   constructor(
     private readonly client = new RejseplanenClient(),
     private readonly pfmEngine = new PFMEngine(),
@@ -21,6 +24,7 @@ export class SuperRoutePlannerService {
     destination: DashboardDestination,
     scooterModeRequested: boolean
   ): Promise<PlannerResult> {
+    const nowMs = Date.now();
     try {
       const location = await this.getCurrentPosition();
       const messages = await this.getMessages();
@@ -58,20 +62,34 @@ export class SuperRoutePlannerService {
 
       const sortedRoutes = this.sortRoutes(routes);
       const promotedRoutes = this.applyBusRecoveryPromotion(sortedRoutes);
-      return {
+      const result: PlannerResult = {
         routes: promotedRoutes,
         staleData: false,
+        staleForMs: 0,
+        dataTimestamp: new Date(nowMs).toISOString(),
         strategicWait: this.pickStrategicWait(promotedRoutes),
         useMetro: queryOverrides.useMetro,
         scooterWeatherWarning: queryOverrides.useMetro === "1" && scooterModeRequested,
         crowdingSnapshot,
         weatherSnapshot
       };
+      this.lastSuccessfulPlan = result;
+      this.lastSuccessfulAtMs = nowMs;
+      return result;
     } catch {
+      if (this.lastSuccessfulPlan && this.lastSuccessfulAtMs && nowMs - this.lastSuccessfulAtMs < 3 * 60 * 1000) {
+        return {
+          ...this.lastSuccessfulPlan,
+          staleData: false,
+          staleForMs: nowMs - this.lastSuccessfulAtMs
+        };
+      }
       return {
         routes: [],
         staleData: true,
         staleMessage: "Data er forældet. Jernbanen er blind lige nu – pas på.",
+        staleForMs: this.lastSuccessfulAtMs ? nowMs - this.lastSuccessfulAtMs : undefined,
+        dataTimestamp: this.lastSuccessfulPlan?.dataTimestamp,
         useMetro: "1",
         scooterWeatherWarning: false
       };
@@ -98,7 +116,7 @@ export class SuperRoutePlannerService {
       journeyName: journeyData.journeyName
     });
     const pfm = hardcodedCrowdingLevel === "HIGH" ? { ...pfmBase, crowdingLevel: "HIGH" as const } : pfmBase;
-    const officialETA = legs.at(-1)?.rtArrivalTime ?? legs.at(-1)?.Destination.time ?? "--:--";
+    const officialETA = this.getTrueETA(legs.at(-1), legs.at(-1)?.Destination) ?? "--:--";
     const isBusOrMetroRoute = this.infrastructureMap.isBusOrMetroRoute(legs, journeyData.journeyName);
     const hasLiveBusRealtime = this.infrastructureMap.hasRealtimeForBusLeg(legs, journeyData.journeyName);
 
@@ -109,13 +127,15 @@ export class SuperRoutePlannerService {
       officialETA,
       isBusOrMetroRoute,
       hasLiveBusRealtime,
-      mapCoordinates: journeyData.mapCoordinates
+      mapCoordinates: journeyData.mapCoordinates,
+      liveVehicleCoordinate: journeyData.liveVehicleCoordinate
     };
   }
 
   private async fetchJourneyData(ref: string): Promise<{
     mapCoordinates: Array<{ lat: number; lng: number; label: string }>;
     journeyName?: string;
+    liveVehicleCoordinate?: { lat: number; lng: number; label: string; estimated: boolean };
   }> {
     const detail = await this.client.getJourneyDetail(ref);
     const stops = this.toArray<JourneyDetailStop>(detail.JourneyDetail?.stop);
@@ -126,9 +146,26 @@ export class SuperRoutePlannerService {
         label: stop.name ?? "Stop"
       }))
       .filter((c) => Number.isFinite(c.lat) && Number.isFinite(c.lng));
+    const liveStop = this.pickLatestRealtimeStop(stops);
+    const estimatedStop = !liveStop ? stops.find((s) => Number.isFinite(Number(s.lat)) && Number.isFinite(Number(s.lon))) : undefined;
     return {
       mapCoordinates,
-      journeyName: detail.JourneyDetail?.name
+      journeyName: detail.JourneyDetail?.name,
+      liveVehicleCoordinate: liveStop
+        ? {
+            lat: Number(liveStop.lat),
+            lng: Number(liveStop.lon),
+            label: liveStop.name ?? "Live",
+            estimated: false
+          }
+        : estimatedStop
+          ? {
+              lat: Number(estimatedStop.lat),
+              lng: Number(estimatedStop.lon),
+              label: `${estimatedStop.name ?? "Position"} (estimeret)`,
+              estimated: true
+            }
+          : undefined
     };
   }
 
@@ -203,6 +240,44 @@ export class SuperRoutePlannerService {
     const now = new Date();
     const current = now.getHours() * 60 + now.getMinutes();
     return (target - current + 24 * 60) % (24 * 60);
+  }
+
+  private getTrueETA(lastLeg?: Leg, destination?: Leg["Destination"]): string | undefined {
+    const destinationAny = destination as unknown as { rtTime?: string; arrivalTime?: string; time?: string } | undefined;
+    return lastLeg?.rtArrivalTime ?? destinationAny?.rtTime ?? destinationAny?.arrivalTime ?? destinationAny?.time;
+  }
+
+  private pickLatestRealtimeStop(stops: JourneyDetailStop[]): JourneyDetailStop | undefined {
+    const now = Date.now();
+    const candidates = stops
+      .map((stop) => ({
+        stop,
+        ts: this.resolveStopRealtimeEpoch(stop)
+      }))
+      .filter((x): x is { stop: JourneyDetailStop; ts: number } => typeof x.ts === "number" && x.ts <= now)
+      .sort((a, b) => b.ts - a.ts);
+    return candidates[0]?.stop;
+  }
+
+  private resolveStopRealtimeEpoch(stop: JourneyDetailStop): number | undefined {
+    const date = stop.rtDepDate ?? stop.rtArrDate ?? stop.depDate ?? stop.arrDate;
+    const time = stop.rtDepTime ?? stop.rtArrTime ?? stop.depTime ?? stop.arrTime;
+    if (!time) return undefined;
+    const parsed = this.parseDateTime(date, time);
+    return parsed?.getTime();
+  }
+
+  private parseDateTime(date: string | undefined, time: string): Date | undefined {
+    if (date) {
+      const d = new Date(`${date}T${time}:00`);
+      if (!Number.isNaN(d.getTime())) return d;
+    }
+    const now = new Date();
+    const match = time.match(/^(\d{1,2}):(\d{2})$/);
+    if (!match) return undefined;
+    const d = new Date(now);
+    d.setHours(Number(match[1]), Number(match[2]), 0, 0);
+    return d;
   }
 
   private firstLocation(value: Location | Location[] | undefined): Location | undefined {

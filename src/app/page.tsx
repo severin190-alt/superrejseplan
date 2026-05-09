@@ -59,7 +59,10 @@ export default function DashboardPage() {
         });
       }
       if (nextPlan.staleData) {
-        setError(nextPlan.staleMessage ?? "Data er forældet.");
+        const staleForMs = nextPlan.staleForMs ?? Number.MAX_SAFE_INTEGER;
+        if (staleForMs >= 3 * 60 * 1000) {
+          setError(nextPlan.staleMessage ?? "Data er forældet.");
+        }
       }
     } catch {
       setError("Data er forældet. Jernbanen er blind lige nu – pas på.");
@@ -189,6 +192,7 @@ export default function DashboardPage() {
 
       <LiveMapPanel
         routeCoordinates={selectedCoordinates}
+        liveVehicleCoordinate={selectedRoute?.liveVehicleCoordinate}
         currentPosition={currentPosition}
         scooterEnabled={scooterModeRequested}
         unstable={selectedRoute?.pfm.unstable}

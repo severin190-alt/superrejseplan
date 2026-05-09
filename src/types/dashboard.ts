@@ -11,12 +11,15 @@ export interface DashboardRoute {
   isBusOrMetroRoute: boolean;
   hasLiveBusRealtime: boolean;
   mapCoordinates: Array<{ lat: number; lng: number; label: string }>;
+  liveVehicleCoordinate?: { lat: number; lng: number; label: string; estimated: boolean };
 }
 
 export interface PlannerResult {
   routes: DashboardRoute[];
   staleData: boolean;
   staleMessage?: string;
+  dataTimestamp?: string;
+  staleForMs?: number;
   strategicWait?: string;
   useMetro: "0" | "1";
   scooterWeatherWarning: boolean;
