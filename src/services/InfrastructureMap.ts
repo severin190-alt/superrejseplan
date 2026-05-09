@@ -29,6 +29,19 @@ const LINE_MAPPINGS: LineMapping[] = [
 ];
 
 export class InfrastructureMap {
+  sanitizeText(text: string): string {
+    return text
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/æ/g, "ae")
+      .replace(/ø/g, "o")
+      .replace(/å/g, "a")
+      .replace(/[^a-z0-9]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
   messageAffectsRoute(message: HIMMessage, legs: Leg[]): boolean {
     const mappedStations = this.getMappedStations(message);
     if (mappedStations.size === 0) {
@@ -44,9 +57,12 @@ export class InfrastructureMap {
   }
 
   isVestbanenCancellation(message: HIMMessage): boolean {
-    const text = this.normalize(`${message.header ?? ""} ${message.content ?? ""}`);
-    const mentionsVestbanen = text.includes("vestbanen") || text.includes("11a") || text.includes("11b");
-    const cancelled = text.includes("aflyst") || text.includes("indstillet") || text.includes("udgar");
+    const text = this.sanitizeText(`${message.header ?? ""} ${message.content ?? ""}`);
+    const mentionsVestbanen =
+      text.includes("vestbanen") ||
+      /\b11\s*[ab]\b/.test(text) ||
+      /\bbane\s*11\s*[ab]\b/.test(text);
+    const cancelled = /\b(aflyst|indstillet|udgar|udgaet|aflyses)\b/.test(text);
     return mentionsVestbanen && cancelled;
   }
 
@@ -83,11 +99,11 @@ export class InfrastructureMap {
   }
 
   private getMappedStations(message: HIMMessage): Set<string> {
-    const text = this.normalize(`${message.header ?? ""} ${message.content ?? ""}`);
+    const text = this.sanitizeText(`${message.header ?? ""} ${message.content ?? ""}`);
     const stationSet = new Set<string>();
     for (const mapping of LINE_MAPPINGS) {
-      if (mapping.keys.some((key) => text.includes(this.normalize(key)))) {
-        mapping.stations.forEach((station) => stationSet.add(this.normalize(station)));
+      if (mapping.keys.some((key) => this.matchesLineKey(text, this.sanitizeText(key)))) {
+        mapping.stations.forEach((station) => stationSet.add(this.sanitizeText(station)));
       }
     }
     return stationSet;
@@ -103,7 +119,7 @@ export class InfrastructureMap {
   }
 
   private normalize(value: string): string {
-    return value.toLowerCase().replace(/\s+/g, " ").trim();
+    return this.sanitizeText(value);
   }
 
   private routeText(legs: Leg[], journeyName?: string): string {
@@ -116,6 +132,22 @@ export class InfrastructureMap {
 
   private looksLikeBusLine(text: string): boolean {
     return /\b(1\d{2}|2\d{2}|[0-9]{1,2}[a-z]?)\b/.test(text);
+  }
+
+  private matchesLineKey(text: string, key: string): boolean {
+    const keyTrim = key.trim();
+    if (/^\d{1,2}[a-z]?$/.test(keyTrim)) {
+      const escaped = keyTrim.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const re = new RegExp(`\\b(?:bane\\s*)?${escaped}\\b`);
+      return re.test(text);
+    }
+    if (/^bane\s*\d{1,2}[a-z]?$/.test(keyTrim)) {
+      const numberPart = keyTrim.replace(/^bane\s*/, "");
+      const escaped = numberPart.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const re = new RegExp(`\\bbane\\s*${escaped}\\b`);
+      return re.test(text);
+    }
+    return text.includes(keyTrim);
   }
 
   private toArray<T>(value: T | T[] | undefined): T[] {

@@ -191,6 +191,7 @@ export default function DashboardPage() {
         routeCoordinates={selectedCoordinates}
         currentPosition={currentPosition}
         scooterEnabled={scooterModeRequested}
+        unstable={selectedRoute?.pfm.unstable}
       />
     </main>
   );

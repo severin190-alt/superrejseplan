@@ -87,17 +87,18 @@ export class SuperRoutePlannerService {
     weatherCondition?: string,
     weatherSnapshot?: PFMContext["weatherSnapshot"]
   ): Promise<DashboardRoute> {
+    const legs = this.toArray<Leg>(trip.Leg);
+    const ref = legs.at(0)?.JourneyDetailRef?.ref;
+    const journeyData = ref ? await this.fetchJourneyData(ref) : { mapCoordinates: [], journeyName: undefined };
     const pfmBase = this.pfmEngine.evaluateTrip(trip, {
       himMessages: messages,
       scooterModeRequested,
       weatherCondition,
-      weatherSnapshot
+      weatherSnapshot,
+      journeyName: journeyData.journeyName
     });
     const pfm = hardcodedCrowdingLevel === "HIGH" ? { ...pfmBase, crowdingLevel: "HIGH" as const } : pfmBase;
-    const legs = this.toArray<Leg>(trip.Leg);
     const officialETA = legs.at(-1)?.rtArrivalTime ?? legs.at(-1)?.Destination.time ?? "--:--";
-    const ref = legs.at(0)?.JourneyDetailRef?.ref;
-    const journeyData = ref ? await this.fetchJourneyData(ref) : { mapCoordinates: [], journeyName: undefined };
     const isBusOrMetroRoute = this.infrastructureMap.isBusOrMetroRoute(legs, journeyData.journeyName);
     const hasLiveBusRealtime = this.infrastructureMap.hasRealtimeForBusLeg(legs, journeyData.journeyName);
 
@@ -185,10 +186,14 @@ export class SuperRoutePlannerService {
     if (candidates.length === 0) {
       return routes;
     }
-    const quickest = candidates.sort(
-      (a, b) => this.minutesUntil(a.pfm.pfmETA) - this.minutesUntil(b.pfm.pfmETA)
-    )[0];
+    const quickest = candidates.sort((a, b) => this.selectionScore(a) - this.selectionScore(b))[0];
     return [quickest, ...routes.filter((r) => r.id !== quickest.id)];
+  }
+
+  private selectionScore(route: DashboardRoute): number {
+    const minutes = this.minutesUntil(route.pfm.pfmETA);
+    const reliabilityFactor = 1 + (1 - route.pfm.reliabilityScore / 100);
+    return minutes * reliabilityFactor;
   }
 
   private minutesUntil(hhmm: string): number {

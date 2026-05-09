@@ -40,7 +40,7 @@ export class PFMService {
     const recoveryPenalty = this.applyRecoveryPenalty(input.context, now, reasons);
     penalties.push(recoveryPenalty);
 
-    const busOrMetroRoute = this.infrastructureMap.isBusOrMetroRoute(legs);
+    const busOrMetroRoute = this.infrastructureMap.isBusOrMetroRoute(legs, input.context?.journeyName);
     const incidentOutcome = this.applyIncidentWeighting(input.context?.himMessages, legs, now, busOrMetroRoute);
     penalties.push(incidentOutcome.penaltyMinutes);
     reasons.push(...incidentOutcome.reasons);
@@ -74,7 +74,7 @@ export class PFMService {
       reasons.push("Favorit-rute comfort bonus");
     }
 
-    const crowding = this.computeCrowding(legs, input.context?.himMessages, now);
+    const crowding = this.computeCrowding(legs, input.context?.himMessages, now, input.context?.journeyName);
     if (crowding.penalty > 0) {
       reliabilityScore -= crowding.penalty;
       reasons.push(crowding.reason);
@@ -419,7 +419,8 @@ export class PFMService {
   private computeCrowding(
     legs: Leg[],
     messages: HIMMessage[] | undefined,
-    now: Date
+    now: Date,
+    journeyName?: string
   ): {
     level: "LOW" | "MEDIUM" | "HIGH";
     penalty: number;
@@ -438,7 +439,7 @@ export class PFMService {
     });
 
     if (
-      this.infrastructureMap.isRoskildeKbhBusCorridor(legs) &&
+      this.infrastructureMap.isRoskildeKbhBusCorridor(legs, journeyName) &&
       (messages ?? []).some((msg) => this.infrastructureMap.isVestbanenCancellation(msg))
     ) {
       return {

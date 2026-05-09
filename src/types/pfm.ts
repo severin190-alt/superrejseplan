@@ -30,6 +30,7 @@ export interface PFMContext {
   departures?: Departure[];
   incidentWindows?: PFMIncidentWindow[];
   now?: Date;
+  journeyName?: string;
   scooterModeRequested?: boolean;
   weatherCondition?: string;
   weatherSnapshot?: {
