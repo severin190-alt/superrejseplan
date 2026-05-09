@@ -22,8 +22,33 @@ export class RejseplanenApiError extends Error {
   }
 }
 
+function resolveAccessId(explicit?: string): string {
+  const id = explicit ?? process.env.REJSEPLANEN_ACCESS_ID ?? "";
+  if (!id.trim()) {
+    throw new RejseplanenApiError(
+      "Mangler REJSEPLANEN_ACCESS_ID. Anmod om API 2.0-adgang på Rejseplanen Labs og tilføj nøglen til .env.local.",
+      "config"
+    );
+  }
+  return id.trim();
+}
+
+/** Rewrites deprecated xmlopen journeyDetail URLs to API 2.0. */
+function rewriteLegacyRejseplanenUrl(ref: string): string {
+  return ref
+    .replace(/^http:\/\/xmlopen\.rejseplanen\.dk\/bin\/rest\.exe\/v2\//i, "https://www.rejseplanen.dk/api/")
+    .replace(/^https:\/\/xmlopen\.rejseplanen\.dk\/bin\/rest\.exe\/v2\//i, "https://www.rejseplanen.dk/api/");
+}
+
 export class RejseplanenClient {
-  constructor(private readonly baseUrl: string = REJSEPLANEN_BASE_URL) {}
+  private readonly accessId: string;
+
+  constructor(
+    private readonly baseUrl: string = REJSEPLANEN_BASE_URL,
+    accessId?: string
+  ) {
+    this.accessId = resolveAccessId(accessId);
+  }
 
   async getTrip(
     originId: string,
@@ -42,13 +67,15 @@ export class RejseplanenClient {
   }
 
   async getLocation(query: string): Promise<LocationResponse> {
-    return this.get<LocationResponse>("location", {
+    return this.get<LocationResponse>("location.name", {
       input: query
     });
   }
 
   async getJourneyDetail(ref: string): Promise<JourneyDetailResponse> {
-    const url = new URL(ref, this.baseUrl);
+    const normalized = rewriteLegacyRejseplanenUrl(ref);
+    const url = normalized.startsWith("http") ? new URL(normalized) : new URL(normalized, this.baseUrl);
+    url.searchParams.set("accessId", this.accessId);
     url.searchParams.set("format", REJSEPLANEN_DEFAULT_QUERY.format);
     url.searchParams.set("lang", REJSEPLANEN_DEFAULT_QUERY.lang);
     return this.fetchAndValidate<JourneyDetailResponse>(url.toString(), "journeyDetail");
@@ -59,17 +86,15 @@ export class RejseplanenClient {
     latitude: number,
     options?: { maxNo?: number }
   ): Promise<LocationResponse> {
-    return this.get<LocationResponse>("location", {
-      coordX: String(longitude),
-      coordY: String(latitude),
+    return this.get<LocationResponse>("location.nearbystops", {
+      originCoordLat: String(latitude),
+      originCoordLong: String(longitude),
       ...(typeof options?.maxNo === "number" ? { maxNo: String(options.maxNo) } : {})
     });
   }
 
   async getTrafficMessages(): Promise<HIMResponse> {
-    return this.get<HIMResponse>("himSearch", {
-      clientType: "WEB"
-    });
+    return this.get<HIMResponse>("himsearch", {});
   }
 
   async getDepartures(
@@ -78,8 +103,7 @@ export class RejseplanenClient {
   ): Promise<DepartureBoardResponse> {
     return this.get<DepartureBoardResponse>("departureBoard", {
       id: stationId,
-      "useS-train": "1",
-      useBus: "1",
+      type: "DEP",
       ...(typeof options?.products === "number" ? { products: String(options.products) } : {})
     });
   }
@@ -88,6 +112,7 @@ export class RejseplanenClient {
     const url = new URL(endpoint, this.baseUrl);
 
     Object.entries({
+      accessId: this.accessId,
       ...REJSEPLANEN_DEFAULT_QUERY,
       ...params
     }).forEach(([key, value]) => {
@@ -100,14 +125,26 @@ export class RejseplanenClient {
   private async fetchAndValidate<T>(url: string, endpoint: string): Promise<T> {
     const response = await fetch(url);
 
-    if (!response.ok) {
+    const text = await response.text();
+    let payload: unknown;
+    try {
+      payload = JSON.parse(text);
+    } catch {
       throw new RejseplanenApiError(
-        `HTTP error from Rejseplanen API: ${response.status} ${response.statusText}`,
-        endpoint
+        "Rejseplanen returnerede ikke JSON (tjek REJSEPLANEN_ACCESS_ID og at xmlopen ikke længere bruges).",
+        endpoint,
+        text.slice(0, 400)
       );
     }
 
-    const payload: unknown = await response.json();
+    if (!response.ok) {
+      throw new RejseplanenApiError(
+        `HTTP error from Rejseplanen API: ${response.status} ${response.statusText}`,
+        endpoint,
+        payload
+      );
+    }
+
     this.assertNoApiError(payload, endpoint);
     return payload as T;
   }

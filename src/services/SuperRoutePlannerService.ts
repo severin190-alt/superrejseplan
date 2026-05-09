@@ -9,9 +9,6 @@ import { WeatherService } from "./WeatherService";
 import { InfrastructureMap } from "./InfrastructureMap";
 
 export class SuperRoutePlannerService {
-  private lastSuccessfulPlan?: PlannerResult;
-  private lastSuccessfulAtMs?: number;
-
   constructor(
     private readonly client = new RejseplanenClient(),
     private readonly pfmEngine = new PFMEngine(),
@@ -22,11 +19,12 @@ export class SuperRoutePlannerService {
 
   async buildDashboardPlan(
     destination: DashboardDestination,
-    scooterModeRequested: boolean
+    scooterModeRequested: boolean,
+    userPosition: { lat: number; lng: number }
   ): Promise<PlannerResult> {
     const nowMs = Date.now();
     try {
-      const location = await this.getCurrentPosition();
+      const location = userPosition;
       const messages = await this.getMessages();
       const crowdingSnapshot = this.crowdingService.estimate();
       const weatherSnapshot = await this.weatherService.getWeatherForPosition(location.lat, location.lng);
@@ -73,23 +71,17 @@ export class SuperRoutePlannerService {
         crowdingSnapshot,
         weatherSnapshot
       };
-      this.lastSuccessfulPlan = result;
-      this.lastSuccessfulAtMs = nowMs;
       return result;
-    } catch {
-      if (this.lastSuccessfulPlan && this.lastSuccessfulAtMs && nowMs - this.lastSuccessfulAtMs < 3 * 60 * 1000) {
-        return {
-          ...this.lastSuccessfulPlan,
-          staleData: false,
-          staleForMs: nowMs - this.lastSuccessfulAtMs
-        };
-      }
+    } catch (err) {
+      const loadError =
+        err instanceof Error
+          ? err.message
+          : "Ukendt fejl ved hentning af rejseplan.";
       return {
         routes: [],
-        staleData: true,
-        staleMessage: "Data er forældet. Jernbanen er blind lige nu – pas på.",
-        staleForMs: this.lastSuccessfulAtMs ? nowMs - this.lastSuccessfulAtMs : undefined,
-        dataTimestamp: this.lastSuccessfulPlan?.dataTimestamp,
+        staleData: false,
+        loadError,
+        dataTimestamp: new Date(nowMs).toISOString(),
         useMetro: "1",
         scooterWeatherWarning: false
       };
@@ -292,25 +284,4 @@ export class SuperRoutePlannerService {
     return Array.isArray(value) ? value : [value];
   }
 
-  private getCurrentPosition(): Promise<{ lat: number; lng: number }> {
-    return new Promise((resolve, reject) => {
-      if (typeof navigator === "undefined" || !navigator.geolocation) {
-        reject(new Error("Geolocation not available"));
-        return;
-      }
-      navigator.geolocation.getCurrentPosition(
-        (position) => {
-          resolve({
-            lat: position.coords.latitude,
-            lng: position.coords.longitude
-          });
-        },
-        (error) => reject(error),
-        {
-          enableHighAccuracy: true,
-          timeout: 10000
-        }
-      );
-    });
-  }
 }

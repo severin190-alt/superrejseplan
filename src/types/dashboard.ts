@@ -17,6 +17,8 @@ export interface DashboardRoute {
 export interface PlannerResult {
   routes: DashboardRoute[];
   staleData: boolean;
+  /** Første fejl eller API-konfiguration — ikke det samme som “forældet data”. */
+  loadError?: string;
   staleMessage?: string;
   dataTimestamp?: string;
   staleForMs?: number;

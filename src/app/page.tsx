@@ -1,15 +1,31 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { AlertTriangle, Bike, Cloud, Train } from "lucide-react";
 import { DecisionCard } from "../components/DecisionCard";
 import { LiveMapPanel } from "../components/LiveMapPanel";
 import { StrategicWaitBox } from "../components/StrategicWaitBox";
 import { DashboardDestination, DashboardRoute, PlannerResult } from "../types/dashboard";
-import { SuperRoutePlannerService } from "../services/SuperRoutePlannerService";
 import { analyzeTravelSituation, AnalyzeTravelSituationResult } from "./actions/analyzeTravelSituation";
+import { buildDashboardPlanAction } from "./actions/buildDashboardPlan";
 
-const planner = new SuperRoutePlannerService();
+function getBrowserPosition(): Promise<{ lat: number; lng: number }> {
+  return new Promise((resolve, reject) => {
+    if (typeof navigator === "undefined" || !navigator.geolocation) {
+      reject(new Error("Geolocation ikke tilgængelig. Tillad placering i browseren."));
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (position) =>
+        resolve({
+          lat: position.coords.latitude,
+          lng: position.coords.longitude
+        }),
+      (geoErr) => reject(new Error(geoErr.message || "Kunne ikke læse GPS")),
+      { enableHighAccuracy: true, timeout: 10000 }
+    );
+  });
+}
 
 export default function DashboardPage() {
   const [scooterModeRequested, setScooterModeRequested] = useState(false);
@@ -20,12 +36,54 @@ export default function DashboardPage() {
   const [currentPosition, setCurrentPosition] = useState<{ lat: number; lng: number } | undefined>(undefined);
   const [aiLoading, setAiLoading] = useState(false);
   const [navigatorInsight, setNavigatorInsight] = useState<AnalyzeTravelSituationResult | null>(null);
+  const lastGoodRef = useRef<{ plan: PlannerResult; at: number } | null>(null);
 
   async function runPlanning(destination: DashboardDestination) {
     setLoading(true);
     setError(null);
     try {
-      const nextPlan = await planner.buildDashboardPlan(destination, scooterModeRequested);
+      const position = await getBrowserPosition();
+      setCurrentPosition(position);
+
+      const rawPlan = await buildDashboardPlanAction(destination, scooterModeRequested, position);
+
+      let nextPlan: PlannerResult = rawPlan;
+      const failed = Boolean(rawPlan.loadError);
+
+      if (failed) {
+        if (lastGoodRef.current) {
+          const age = Date.now() - lastGoodRef.current.at;
+          if (age < 3 * 60 * 1000) {
+            nextPlan = {
+              ...lastGoodRef.current.plan,
+              staleData: false,
+              staleForMs: age,
+              loadError: undefined
+            };
+          } else {
+            nextPlan = {
+              ...rawPlan,
+              routes: [],
+              staleData: true,
+              staleMessage: "Data er forældet. Jernbanen er blind lige nu – pas på.",
+              staleForMs: age,
+              loadError: undefined
+            };
+            setError(nextPlan.staleMessage ?? null);
+          }
+        } else {
+          nextPlan = rawPlan;
+          setError(rawPlan.loadError ?? "Kunne ikke hente rejseplan.");
+        }
+      } else {
+        nextPlan = rawPlan;
+        if (rawPlan.routes.length > 0) {
+          lastGoodRef.current = { plan: rawPlan, at: Date.now() };
+        }
+      }
+
+      console.log("[SuperRejseplan] plan (vist state)", nextPlan, "routes length:", nextPlan.routes?.length);
+
       setPlan(nextPlan);
       setSelectedRoute(nextPlan.routes[0] ?? null);
       setNavigatorInsight(null);
@@ -52,20 +110,9 @@ export default function DashboardPage() {
         isScooterActive: scooterModeRequested
       });
       setNavigatorInsight(aiResult);
-
-      if (typeof navigator !== "undefined" && navigator.geolocation) {
-        navigator.geolocation.getCurrentPosition((p) => {
-          setCurrentPosition({ lat: p.coords.latitude, lng: p.coords.longitude });
-        });
-      }
-      if (nextPlan.staleData) {
-        const staleForMs = nextPlan.staleForMs ?? Number.MAX_SAFE_INTEGER;
-        if (staleForMs >= 3 * 60 * 1000) {
-          setError(nextPlan.staleMessage ?? "Data er forældet.");
-        }
-      }
-    } catch {
-      setError("Data er forældet. Jernbanen er blind lige nu – pas på.");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Uventet fejl ved planlægning.";
+      setError(msg);
     } finally {
       setAiLoading(false);
       setLoading(false);

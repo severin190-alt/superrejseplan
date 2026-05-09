@@ -61,7 +61,7 @@ export async function analyzeTravelSituation(
     const timeoutId = setTimeout(() => controller.abort(), 8000);
     try {
       const client = new GoogleGenerativeAI(apiKey);
-      const model = client.getGenerativeModel({ model: "gemini-1.5-flash" });
+      const model = client.getGenerativeModel({ model: "gemini-2.0-flash" });
       const prompt = `${SYSTEM_PROMPT}\n\nInput:\n${JSON.stringify(input)}`;
       const result = await Promise.race([
         model.generateContent(prompt),
