@@ -25,10 +25,70 @@ const LINE_MAPPINGS: LineMapping[] = [
   {
     keys: ["bane 80", "bane 81", "bane 82", "bane 83", "bane 84", "bane 85", "bane 86", "bane 87", "s-tog", "s tog"],
     stations: ["valby", "høje taastrup", "hoeje taastrup", "køge", "koege"]
+  },
+  {
+    keys: ["linje m1", "linje m2", "metro m1", "metro m2", " m1 ", " m2 ", "metrosektion"],
+    stations: [
+      "vanlose",
+      "vanløse",
+      "frederiksberg",
+      "norreport",
+      "norre report",
+      "oerestad",
+      "ørestad",
+      "lindevang",
+      "flintholm",
+      "kongens nytorv",
+      "christianshavn",
+      "amagerbro"
+    ]
+  },
+  {
+    keys: ["linje c", "linje h", "s-tog c", "s-tog h", "s tog c", "s tog h"],
+    stations: ["vanlose", "vanløse", "valby", "københavn h", "kobenhavn h", "norreport", "oerestad", "ørestad"]
   }
 ];
 
+/** Kanoniske linje-tokens til planlagte hændelser ↔ rute-match (ingen hardcodede buslister). */
+export type CanonicalLineToken = string;
+
 export class InfrastructureMap {
+  /**
+   * Udleder kanoniske linje-ID'er: METRO:M1–M4, STOG:A–H, BUS:<tal>[A|C|S]? , RE, IC.
+   */
+  extractCanonicalLineTokens(raw: string): CanonicalLineToken[] {
+    const found = new Set<CanonicalLineToken>();
+    const upper = raw.toUpperCase();
+
+    for (const m of upper.matchAll(/\bM\s*([1-4])\b/g)) {
+      found.add(`METRO:M${m[1]}`);
+    }
+    for (const m of upper.matchAll(/\bLINJE\s*([A-H])\b/g)) {
+      found.add(`STOG:${m[1]}`);
+    }
+    for (const m of upper.matchAll(/\bS[\s-]*TOG(?:\s+LINJE)?\s*([A-H])\b/g)) {
+      found.add(`STOG:${m[1]}`);
+    }
+    for (const m of raw.matchAll(/\b(RE|IC)\b/gi)) {
+      found.add(m[1].toUpperCase());
+    }
+    for (const m of raw.matchAll(/\b(\d{1,3})([ACS])?\b/gi)) {
+      const num = m[1];
+      const suf = (m[2] ?? "").toUpperCase();
+      if (/^0+$/.test(num)) continue;
+      const n = Number(num);
+      if (n < 1 || n > 999) continue;
+      found.add(`BUS:${num}${suf}`);
+    }
+    return [...found];
+  }
+
+  /** Sand hvis rute-tekst matcher et kanonisk BUS:-token (ikke togbus-kontekst alene). */
+  routeHasRegularBusLine(routeText: string): boolean {
+    const tokens = this.extractCanonicalLineTokens(routeText);
+    return tokens.some((t) => t.startsWith("BUS:"));
+  }
+
   sanitizeText(text: string): string {
     return text
       .toLowerCase()
@@ -131,7 +191,7 @@ export class InfrastructureMap {
   }
 
   private looksLikeBusLine(text: string): boolean {
-    return /\b(1\d{2}|2\d{2}|[0-9]{1,2}[a-z]?)\b/.test(text);
+    return this.extractCanonicalLineTokens(text).some((t) => t.startsWith("BUS:"));
   }
 
   private matchesLineKey(text: string, key: string): boolean {

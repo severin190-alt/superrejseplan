@@ -1,9 +1,8 @@
 "use client";
 
 import { useMemo, useRef, useState } from "react";
-import { AlertTriangle, Bike, Cloud, Train } from "lucide-react";
+import { AlertTriangle, Bike, Cloud, Music, Train } from "lucide-react";
 import { DecisionCard } from "../components/DecisionCard";
-import { LiveMapPanel } from "../components/LiveMapPanel";
 import { StrategicWaitBox } from "../components/StrategicWaitBox";
 import { DashboardDestination, DashboardRoute, PlannerResult } from "../types/dashboard";
 import { analyzeTravelSituation, AnalyzeTravelSituationResult } from "./actions/analyzeTravelSituation";
@@ -32,26 +31,29 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [plan, setPlan] = useState<PlannerResult | null>(null);
+  const [activeDestination, setActiveDestination] = useState<DashboardDestination | null>(null);
   const [selectedRoute, setSelectedRoute] = useState<DashboardRoute | null>(null);
-  const [currentPosition, setCurrentPosition] = useState<{ lat: number; lng: number } | undefined>(undefined);
   const [aiLoading, setAiLoading] = useState(false);
   const [navigatorInsight, setNavigatorInsight] = useState<AnalyzeTravelSituationResult | null>(null);
   const lastGoodRef = useRef<{ plan: PlannerResult; at: number } | null>(null);
 
   async function runPlanning(destination: DashboardDestination) {
+    setActiveDestination(destination);
     setLoading(true);
     setError(null);
     try {
       const position = await getBrowserPosition();
-      setCurrentPosition(position);
-
       const rawPlan = await buildDashboardPlanAction(destination, scooterModeRequested, position);
 
       let nextPlan: PlannerResult = rawPlan;
       const failed = Boolean(rawPlan.loadError);
+      const googleConfig = Boolean(rawPlan.googleConfigError);
 
       if (failed) {
-        if (lastGoodRef.current) {
+        if (googleConfig) {
+          nextPlan = rawPlan;
+          setError(rawPlan.loadError ?? "Google Config Error.");
+        } else if (lastGoodRef.current) {
           const age = Date.now() - lastGoodRef.current.at;
           if (age < 3 * 60 * 1000) {
             nextPlan = {
@@ -104,10 +106,23 @@ export default function DashboardPage() {
         suggestBusAlternative: route.pfm.suggestBusAlternative,
         unstable: route.pfm.unstable
       }));
+      const statusDigest = nextPlan.statusDigest;
+      const statusScraperSummary = statusDigest
+        ? [
+            ...statusDigest.identifiedCauses.map((c) => `Årsag: ${c}`),
+            ...statusDigest.summaryLines.slice(0, 4)
+          ].join("\n")
+        : undefined;
+      const rawScraperExcerpt = statusDigest?.rawScraperExcerpt ?? "";
+
       const aiResult = await analyzeTravelSituation({
         officialData,
         pfmData,
-        isScooterActive: scooterModeRequested
+        isScooterActive: scooterModeRequested,
+        statusIdentifiedCauses: statusDigest?.identifiedCauses,
+        statusScraperSummary,
+        rawScraperExcerpt,
+        googleRouteContext: nextPlan.googleRouteContext
       });
       setNavigatorInsight(aiResult);
     } catch (err) {
@@ -119,7 +134,6 @@ export default function DashboardPage() {
     }
   }
 
-  const selectedCoordinates = useMemo(() => selectedRoute?.mapCoordinates ?? [], [selectedRoute?.mapCoordinates]);
   const fallbackRecommendedRouteId = useMemo(() => {
     if (!plan?.routes.length) return null;
     return [...plan.routes].sort((a, b) => b.pfm.reliabilityScore - a.pfm.reliabilityScore)[0]?.id ?? null;
@@ -127,6 +141,7 @@ export default function DashboardPage() {
   const effectiveRecommendedRouteId = navigatorInsight?.recommendedRouteId ?? fallbackRecommendedRouteId;
   const shouldUseAutoRecommendation = Boolean(navigatorInsight && !navigatorInsight.recommendedRouteId);
   const showFallbackBranding = Boolean(navigatorInsight?.isFallback);
+  const salsaRouteWarning = Boolean(plan?.statusDigest?.salsaLineRisk && plan?.statusDigest?.incidentCategory !== "NONE");
 
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-md flex-col gap-4 p-4 md:max-w-3xl md:p-6">
@@ -187,18 +202,19 @@ export default function DashboardPage() {
         {plan?.weatherSnapshot && (
           <div className="mt-3 rounded-xl border border-slate-700 bg-slate-950/60 p-2 text-xs text-slate-300">
             Vejr (
-            {plan.weatherSnapshot.source === "DMI_EDR"
-              ? `DMI EDR (Opdateret ${plan.weatherSnapshot.lastUpdated} UTC)`
-              : `Fallback (Opdateret ${plan.weatherSnapshot.lastUpdated} UTC)`}): {plan.weatherSnapshot.summary}
+            {plan.weatherSnapshot.source === "GOOGLE_WEATHER"
+              ? `Google Weather / weather.googleapis.com · ${plan.weatherSnapshot.lastUpdated} UTC`
+              : `Fallback · ${plan.weatherSnapshot.lastUpdated} UTC`}
+            ): {plan.weatherSnapshot.summary}
           </div>
         )}
       </header>
 
-      <section className="grid grid-cols-2 gap-3">
+      <section className="grid grid-cols-3 gap-2 md:gap-3">
         <button
           type="button"
           onClick={() => runPlanning("WORK")}
-          className="rounded-2xl bg-cyan-500 px-4 py-5 text-sm font-semibold text-slate-950"
+          className="rounded-2xl bg-cyan-500 px-2 py-4 text-xs font-semibold text-slate-950 md:px-4 md:text-sm"
           disabled={loading}
         >
           <Train className="mx-auto mb-1 h-4 w-4" />
@@ -207,13 +223,64 @@ export default function DashboardPage() {
         <button
           type="button"
           onClick={() => runPlanning("HOME")}
-          className="rounded-2xl bg-indigo-500 px-4 py-5 text-sm font-semibold"
+          className="rounded-2xl bg-indigo-500 px-2 py-4 text-xs font-semibold md:px-4 md:text-sm"
           disabled={loading}
         >
           <Cloud className="mx-auto mb-1 h-4 w-4" />
           HJEM
         </button>
+        <button
+          type="button"
+          onClick={() => runPlanning("SALSA")}
+          className={`rounded-2xl bg-purple-600 px-2 py-4 text-xs font-semibold text-white md:px-4 md:text-sm ${
+            salsaRouteWarning ? "animate-pulse border-2 border-rose-400" : ""
+          }`}
+          disabled={loading}
+        >
+          <Music className="mx-auto mb-1 h-4 w-4" />
+          TIL SALSA
+        </button>
       </section>
+
+      {plan?.statusDigest && (
+        <section className="rounded-2xl border border-slate-700 bg-slate-900/80 p-4">
+          <h2 className="text-xs font-semibold uppercase tracking-wide text-fuchsia-300">Status-radar (alle kilder)</h2>
+          <p className="mt-1 text-[11px] text-slate-500">
+            Opdateret {new Date(plan.statusDigest.fetchedAt).toLocaleString("da-DK")} · DSB, Metro, Rejseplanen mobil
+          </p>
+          {plan.statusDigest.identifiedCauses.length > 0 && (
+            <div className="mt-2 flex flex-wrap gap-1">
+              {plan.statusDigest.identifiedCauses.map((c) => (
+                <span
+                  key={c}
+                  className="rounded-full bg-amber-500/20 px-2 py-0.5 text-[11px] font-medium text-amber-100"
+                >
+                  {c}
+                </span>
+              ))}
+            </div>
+          )}
+          {plan.statusDigest.salsaLineRisk && (
+            <p className="mt-2 text-xs text-fuchsia-200">
+              M1/M2 eller S-tog C/H: aktiv forstyrrelse registreret — Vanløse/salsa-rute kan være ustabil.
+            </p>
+          )}
+          <ul className="mt-3 max-h-40 space-y-2 overflow-y-auto text-xs text-slate-300">
+            {plan.statusDigest.summaryLines.map((line, i) => (
+              <li key={i} className="border-l-2 border-slate-600 pl-2">
+                {line}
+              </li>
+            ))}
+          </ul>
+          <div className="mt-2 flex flex-wrap gap-2 text-[10px] text-slate-500">
+            {plan.statusDigest.sourceLabels.map((s) => (
+              <span key={s.source}>
+                {s.source}: {s.ok ? (s.count > 0 ? `${s.count} uddrag` : "OK") : "fejl"}
+              </span>
+            ))}
+          </div>
+        </section>
+      )}
 
       {loading && <div className="text-sm text-slate-300">Beregner ruter...</div>}
       {error && <div className="rounded-xl bg-red-500/20 p-3 text-sm text-red-100">{error}</div>}
@@ -227,6 +294,8 @@ export default function DashboardPage() {
             route={route}
             onSelect={() => setSelectedRoute(route)}
             selected={selectedRoute?.id === route.id}
+            activeDestination={activeDestination}
+            weatherSnapshot={plan.weatherSnapshot}
             aiRecommended={
               Boolean(
                 (navigatorInsight?.recommendedRouteId && navigatorInsight.recommendedRouteId === route.id) ||
@@ -237,13 +306,6 @@ export default function DashboardPage() {
         ))}
       </section>
 
-      <LiveMapPanel
-        routeCoordinates={selectedCoordinates}
-        liveVehicleCoordinate={selectedRoute?.liveVehicleCoordinate}
-        currentPosition={currentPosition}
-        scooterEnabled={scooterModeRequested}
-        unstable={selectedRoute?.pfm.unstable}
-      />
     </main>
   );
 }

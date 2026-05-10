@@ -33,9 +33,23 @@ export class PFMService {
 
     const penalties: number[] = [];
     let reliabilityScore = 100;
-    let unstable = false;
+    let unstable = Boolean(input.context?.salsaRouteUnstable);
     let suggestBusAlternative = false;
     const reasons: string[] = [];
+
+    if (input.context?.salsaRouteUnstable) {
+      reasons.push("Driftsforstyrrelser på M1/M2 eller S-tog C/H rammer Vanløse-ruten (status-radar)");
+    }
+
+    const causeOutcome = this.applyStatusIdentifiedCauses(input.context?.statusIdentifiedCauses, now, reasons);
+    penalties.push(causeOutcome.penaltyMinutes);
+    unstable = unstable || causeOutcome.unstable;
+
+    const durationOutcome = this.applyIncidentDurationPolicy(input.context, reasons);
+    penalties.push(durationOutcome.penaltyMinutes);
+    reliabilityScore = Math.min(reliabilityScore, durationOutcome.reliabilityCap);
+    unstable = unstable || durationOutcome.unstable;
+    suggestBusAlternative = suggestBusAlternative || durationOutcome.suggestBusAlternative;
 
     const recoveryPenalty = this.applyRecoveryPenalty(input.context, now, reasons);
     penalties.push(recoveryPenalty);
@@ -144,6 +158,92 @@ export class PFMService {
 
   getScooterDecision(context?: PFMContext): { feasible: boolean; weatherWarning: boolean } {
     return this.buildScooterOption(context);
+  }
+
+  private applyStatusIdentifiedCauses(
+    causes: string[] | undefined,
+    now: Date,
+    reasons: string[]
+  ): { penaltyMinutes: number; unstable: boolean } {
+    if (!causes?.length) {
+      return { penaltyMinutes: 0, unstable: false };
+    }
+    let maxPenalty = 0;
+    let unstable = false;
+    for (const raw of causes) {
+      const { minutes, unstable: u } = this.penaltyMinutesForIdentifiedCause(raw, now, reasons);
+      maxPenalty = Math.max(maxPenalty, minutes);
+      unstable = unstable || u;
+    }
+    return { penaltyMinutes: maxPenalty, unstable };
+  }
+
+  private applyIncidentDurationPolicy(
+    context: PFMContext | undefined,
+    reasons: string[]
+  ): { penaltyMinutes: number; reliabilityCap: number; unstable: boolean; suggestBusAlternative: boolean } {
+    const category = context?.routeIncidentCategory ?? "NONE";
+    const usesTogbus = Boolean(context?.routeUsesTogbus);
+    const usesRegularBus = Boolean(context?.routeUsesRegularBus);
+    if (category === "SHORT") {
+      reasons.push("Metro/Tog driller (kortvarigt). Bliv på perronen.");
+      return {
+        penaltyMinutes: 10,
+        reliabilityCap: 80,
+        unstable: false,
+        suggestBusAlternative: false
+      };
+    }
+    if (category === "LONG") {
+      if (usesRegularBus) {
+        reasons.push("Kritisk fejl. Tag regulær bus fremfor togbus.");
+      } else {
+        reasons.push("Kritisk fejl. Find alternativ rute med det samme!");
+      }
+      if (usesTogbus) {
+        reasons.push("Togbusser forventes overfyldte (+20 i valg-score efter øvrige beregninger)");
+      }
+      return {
+        penaltyMinutes: 40,
+        reliabilityCap: 20,
+        unstable: true,
+        suggestBusAlternative: true
+      };
+    }
+    return {
+      penaltyMinutes: 0,
+      reliabilityCap: 100,
+      unstable: false,
+      suggestBusAlternative: false
+    };
+  }
+
+  private penaltyMinutesForIdentifiedCause(
+    cause: string,
+    now: Date,
+    reasons: string[]
+  ): { minutes: number; unstable: boolean } {
+    const c = cause.trim().toLowerCase();
+    if (c.includes("personpåkørsel") || c.includes("personpaakorsel")) {
+      reasons.push("Status-radar: Personpåkørsel (maks. impact)");
+      return { minutes: 240, unstable: true };
+    }
+    if (c.includes("signalfejl")) {
+      const hour = now.getHours();
+      const rushHour = (hour >= 7 && hour <= 9) || (hour >= 15 && hour <= 17);
+      const weighted = rushHour ? 90 : 60;
+      reasons.push(`Status-radar: Signalfejl (+${weighted} min)`);
+      return { minutes: weighted, unstable: false };
+    }
+    if (c.includes("sporarbejde")) {
+      reasons.push("Status-radar: Sporarbejde (+50 min)");
+      return { minutes: 50, unstable: false };
+    }
+    if (c.includes("mangel") && c.includes("togpersonale")) {
+      reasons.push("Status-radar: Mangel på togpersonale (+35 min)");
+      return { minutes: 35, unstable: false };
+    }
+    return { minutes: 0, unstable: false };
   }
 
   private applyRecoveryPenalty(context: PFMContext | undefined, now: Date, reasons: string[]): number {
@@ -278,6 +378,22 @@ export class PFMService {
       };
     }
 
+    if (text.includes("sporarbejde") || text.includes("spor arbejde")) {
+      return {
+        keyword: "sporarbejde",
+        penaltyMinutes: 50,
+        reason: "Sporarbejde: planlagt kapacitetsloft"
+      };
+    }
+
+    if (text.includes("mangel på togpersonale") || text.includes("mangel paa togpersonale")) {
+      return {
+        keyword: "mangel på togpersonale",
+        penaltyMinutes: 35,
+        reason: "Mangel på togpersonale: ustabile afgangstider"
+      };
+    }
+
     return null;
   }
 
@@ -404,7 +520,11 @@ export class PFMService {
   }
 
   private isMessageInGeofence(message: HIMMessage): boolean {
-    const text = `${message.header ?? ""} ${message.content ?? ""}`.toLowerCase();
+    const header = message.header ?? "";
+    if (/^(DSB Akut|Metro|Rejseplanen\s*\(|StatusRadar)/.test(header)) {
+      return true;
+    }
+    const text = `${header} ${message.content ?? ""}`.toLowerCase();
     return PFMService.GEOFENCE_NODES.some((node) => text.includes(node));
   }
 

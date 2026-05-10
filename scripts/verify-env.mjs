@@ -43,41 +43,6 @@ function fail(name, hint) {
   console.error(`❌ ${name}${hint ? `: ${hint}` : ""}`);
 }
 
-async function testRejseplanen(accessId) {
-  if (!accessId) {
-    fail("REJSEPLANEN_ACCESS_ID", "mangler eller tom");
-    return false;
-  }
-  const u = new URL("https://www.rejseplanen.dk/api/location.name");
-  u.searchParams.set("accessId", accessId);
-  u.searchParams.set("format", "json");
-  u.searchParams.set("lang", "da");
-  u.searchParams.set("input", "Roskilde St.");
-  const res = await fetch(u);
-  const text = await res.text();
-  let data;
-  try {
-    data = JSON.parse(text);
-  } catch {
-    fail("REJSEPLANEN_ACCESS_ID", "ikke JSON (tjek nøgle og netværk)");
-    return false;
-  }
-  const rejseErr = data.error ?? data.errorCode;
-  if (rejseErr) {
-    fail(
-      "REJSEPLANEN_ACCESS_ID",
-      String(data.errorText || data.error || data.errorCode)
-    );
-    return false;
-  }
-  if (!res.ok) {
-    fail("REJSEPLANEN_ACCESS_ID", `HTTP ${res.status}`);
-    return false;
-  }
-  ok("REJSEPLANEN_ACCESS_ID (location.name → JSON)");
-  return true;
-}
-
 async function testGoogleMaps(key) {
   if (!key) {
     fail("NEXT_PUBLIC_GOOGLE_MAPS_API_KEY", "mangler eller tom");
@@ -93,6 +58,64 @@ async function testGoogleMaps(key) {
     return true;
   }
   fail("NEXT_PUBLIC_GOOGLE_MAPS_API_KEY", `status: ${data.status}${data.error_message ? " — " + data.error_message : ""}`);
+  return false;
+}
+
+async function testGoogleDirections(key) {
+  if (!key) {
+    fail("NEXT_PUBLIC_GOOGLE_MAPS_API_KEY (Directions)", "mangler eller tom");
+    return false;
+  }
+  const u = new URL("https://maps.googleapis.com/maps/api/directions/json");
+  u.searchParams.set("origin", "55.675,12.568");
+  u.searchParams.set("destination", "55.687,12.491");
+  u.searchParams.set("mode", "transit");
+  u.searchParams.set("departure_time", String(Math.floor(Date.now() / 1000)));
+  u.searchParams.set("region", "dk");
+  u.searchParams.set("language", "da");
+  u.searchParams.set("key", key);
+  const res = await fetch(u);
+  const data = await res.json();
+  if (data.status === "OK" && Array.isArray(data.routes) && data.routes.length > 0) {
+    ok("NEXT_PUBLIC_GOOGLE_MAPS_API_KEY (Directions API — transit)");
+    return true;
+  }
+  const hint =
+    data.status === "REQUEST_DENIED"
+      ? " — aktivér Directions API for nøglen (Google Cloud Console)"
+      : "";
+  fail(
+    "NEXT_PUBLIC_GOOGLE_MAPS_API_KEY (Directions)",
+    `${data.status ?? "ukendt"}${data.error_message ? " — " + data.error_message : ""}${hint}`
+  );
+  return false;
+}
+
+async function testGoogleWeather(key) {
+  if (!key) {
+    fail("NEXT_PUBLIC_GOOGLE_MAPS_API_KEY (Weather)", "mangler eller tom");
+    return false;
+  }
+  const u = new URL("https://weather.googleapis.com/v1/forecast/hours:lookup");
+  u.searchParams.set("key", key);
+  u.searchParams.set("location.latitude", "55.676");
+  u.searchParams.set("location.longitude", "12.568");
+  u.searchParams.set("hours", "1");
+  const res = await fetch(u);
+  const data = await res.json().catch(() => ({}));
+  if (res.ok && Array.isArray(data.forecastHours) && data.forecastHours.length > 0) {
+    ok("NEXT_PUBLIC_GOOGLE_MAPS_API_KEY (Weather API — weather.googleapis.com)");
+    return true;
+  }
+  const errMsg = data?.error?.message || data?.error?.status || res.statusText;
+  const hint =
+    data?.error?.status === "PERMISSION_DENIED" || String(errMsg).includes("API key")
+      ? " — aktivér Weather API for nøglen (Google Cloud Console)"
+      : "";
+  fail(
+    "NEXT_PUBLIC_GOOGLE_MAPS_API_KEY (Weather)",
+    `${errMsg || `HTTP ${res.status}`}${hint}`
+  );
   return false;
 }
 
@@ -121,9 +144,11 @@ async function testGemini(key) {
 async function main() {
   console.log("Miljøcheck (.env.local) — værdier vises ikke.\n");
   const env = loadEnvLocal();
+  const key = env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
   const results = await Promise.all([
-    testRejseplanen(env.REJSEPLANEN_ACCESS_ID),
-    testGoogleMaps(env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY),
+    testGoogleMaps(key),
+    testGoogleDirections(key),
+    testGoogleWeather(key),
     testGemini(env.GOOGLE_AI_API_KEY)
   ]);
   const allOk = results.every(Boolean);
@@ -131,7 +156,7 @@ async function main() {
     console.error("\nEn eller flere nøgler fejlede.");
     process.exit(1);
   }
-  console.log("\nAlle tre nøgler er gyldige mod API’erne.");
+  console.log("\nAlle nøgler er gyldige mod API’erne (Geocoding, Directions, Weather, Gemini).");
 }
 
 main().catch((e) => {

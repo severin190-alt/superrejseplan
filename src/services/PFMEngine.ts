@@ -23,7 +23,11 @@ export class PFMEngine {
 
   extractRelevantMessages(messages: HIMMessage[]): HIMMessage[] {
     return messages.filter((msg) => {
-      const text = `${msg.header ?? ""} ${msg.content ?? ""}`.toLowerCase();
+      const header = msg.header ?? "";
+      if (/^(DSB|Metro|Rejseplanen|Lokaltog|DOT)/.test(header)) {
+        return true;
+      }
+      const text = `${header} ${msg.content ?? ""}`.toLowerCase();
       return (
         text.includes("roskilde") ||
         text.includes("høje taastrup") ||
@@ -34,8 +38,12 @@ export class PFMEngine {
         text.includes("kobenhavn h") ||
         text.includes("ørestad") ||
         text.includes("oerestad") ||
+        text.includes("vanløse") ||
+        text.includes("vanlose") ||
         text.includes("personpåkørsel") ||
         text.includes("signalfejl") ||
+        text.includes("sporarbejde") ||
+        text.includes("mangel på togpersonale") ||
         text.includes("blade på skinnerne") ||
         text.includes("strømsvigt") ||
         text.includes("materielmangel") ||

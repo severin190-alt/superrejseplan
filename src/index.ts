@@ -1,7 +1,8 @@
-export * from "./api/RejseplanenClient";
+export * from "./api/GoogleTransitDirectionsClient";
 export * from "./types/rejseplanen";
 export * from "./types/pfm";
 export * from "./types/dashboard";
+export * from "./types/statusScraper";
 export * from "./config/constants";
 export * from "./services/PFMService";
 export * from "./services/PFMEngine";
@@ -9,3 +10,4 @@ export * from "./services/CrowdingService";
 export * from "./services/WeatherService";
 export * from "./services/InfrastructureMap";
 export * from "./services/SuperRoutePlannerService";
+export * from "./services/StatusScraperService";

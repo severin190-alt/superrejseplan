@@ -1,7 +1,7 @@
 "use client";
 
 import { Cloud, Heart, Radio, Train, Users } from "lucide-react";
-import { DashboardRoute } from "../types/dashboard";
+import { DashboardDestination, DashboardRoute, PlannerResult } from "../types/dashboard";
 
 const statusClasses: Record<DashboardRoute["pfm"]["status"], string> = {
   GREEN: "bg-emerald-500",
@@ -15,26 +15,61 @@ const crowdingLabel: Record<DashboardRoute["pfm"]["crowdingLevel"], string> = {
   HIGH: "Høj"
 };
 
+function isHighPrecipitation(weather?: PlannerResult["weatherSnapshot"]): boolean {
+  if (!weather) return false;
+  const p = weather.precipitationProbability;
+  if (typeof p === "number" && p >= 0.4) return true;
+  const mm = weather.precipitationMm;
+  return typeof mm === "number" && mm >= 0.4;
+}
+
+function cardShellClass(args: {
+  unstable: boolean;
+  salsaTrip: boolean;
+  precip: boolean;
+  selected: boolean;
+}): string {
+  const { unstable, salsaTrip, precip, selected } = args;
+  const ring = selected ? "ring-2 ring-cyan-400" : "";
+  if (unstable) {
+    return `w-full rounded-2xl border border-red-500/75 bg-red-950/40 p-4 text-left text-slate-100 ${ring}`;
+  }
+  if (precip) {
+    return `w-full rounded-2xl border border-sky-600/65 bg-sky-950/35 p-4 text-left text-slate-100 ${ring}`;
+  }
+  if (salsaTrip) {
+    return `w-full rounded-2xl border border-purple-500/65 bg-purple-950/35 p-4 text-left text-slate-100 ${ring}`;
+  }
+  return `w-full rounded-2xl border border-slate-800 bg-slate-900 p-4 text-left ${ring}`;
+}
+
+function statusBarClass(route: DashboardRoute, unstable: boolean): string {
+  if (unstable) return "bg-red-600";
+  return statusClasses[route.pfm.status];
+}
+
 export function DecisionCard({
   route,
   onSelect,
   selected,
-  aiRecommended = false
+  aiRecommended = false,
+  activeDestination = null,
+  weatherSnapshot
 }: {
   route: DashboardRoute;
   onSelect: () => void;
   selected: boolean;
   aiRecommended?: boolean;
+  activeDestination?: DashboardDestination | null;
+  weatherSnapshot?: PlannerResult["weatherSnapshot"];
 }) {
+  const unstable = Boolean(route.pfm.unstable);
+  const salsaTrip = activeDestination === "SALSA";
+  const precip = isHighPrecipitation(weatherSnapshot);
+
   return (
-    <button
-      type="button"
-      onClick={onSelect}
-      className={`w-full rounded-2xl border border-slate-800 bg-slate-900 p-4 text-left ${
-        selected ? "ring-2 ring-cyan-400" : ""
-      }`}
-    >
-      <div className={`h-2 w-full rounded-full ${statusClasses[route.pfm.status]}`} />
+    <button type="button" onClick={onSelect} className={cardShellClass({ unstable, salsaTrip, precip, selected })}>
+      <div className={`h-2 w-full rounded-full ${statusBarClass(route, unstable)}`} />
       <div className="mt-3 flex items-center justify-between">
         <div className="flex items-center gap-2 text-xs text-slate-400">
           <Train className="h-4 w-4" />

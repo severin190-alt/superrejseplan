@@ -5,7 +5,7 @@ type CrowdingSnapshot = {
   tripsPerHour: number;
   weekday: number;
   hour: number;
-  source: "HARD_CODED_REJSEKORT";
+  source: "CROWDING_MODEL_ESTIMATE";
 };
 
 export class CrowdingService {
@@ -21,7 +21,7 @@ export class CrowdingService {
       tripsPerHour,
       weekday,
       hour,
-      source: "HARD_CODED_REJSEKORT"
+      source: "CROWDING_MODEL_ESTIMATE"
     };
   }
 
