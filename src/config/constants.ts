@@ -9,8 +9,3 @@ export const SALSA_DESTINATION = {
   lng: 12.491,
   label: "Vanløse St."
 } as const;
-
-export const FIXED_LOCATION_IDS: Record<keyof typeof FIXED_LOCATIONS, string | null> = {
-  WORK: null,
-  HOME: null
-};

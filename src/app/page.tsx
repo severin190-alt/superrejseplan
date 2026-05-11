@@ -89,13 +89,13 @@ export default function DashboardPage() {
       setPlan(nextPlan);
       setSelectedRoute(nextPlan.routes[0] ?? null);
       setNavigatorInsight(null);
-      setAiLoading(true);
+      setLoading(false);
 
-      const officialData = nextPlan.routes.map((route) => ({
+      const officialData = nextPlan.routes.slice(0, 3).map((route) => ({
         routeId: route.id,
         officialETA: route.officialETA
       }));
-      const pfmData = nextPlan.routes.map((route) => ({
+      const pfmData = nextPlan.routes.slice(0, 3).map((route) => ({
         routeId: route.id,
         pfmETA: route.pfm.pfmETA,
         status: route.pfm.status,
@@ -104,33 +104,40 @@ export default function DashboardPage() {
         isFavoriteRoute: route.pfm.isFavoriteRoute,
         crowdingLevel: route.pfm.crowdingLevel,
         suggestBusAlternative: route.pfm.suggestBusAlternative,
-        unstable: route.pfm.unstable
+        unstable: route.pfm.unstable,
+        isHackerRoute: route.isHackerRoute,
+        legs: route.trip.legs
       }));
       const statusDigest = nextPlan.statusDigest;
-      const statusScraperSummary = statusDigest
-        ? [
-            ...statusDigest.identifiedCauses.map((c) => `Årsag: ${c}`),
-            ...statusDigest.summaryLines.slice(0, 4)
-          ].join("\n")
-        : undefined;
       const rawScraperExcerpt = statusDigest?.rawScraperExcerpt ?? "";
 
-      const aiResult = await analyzeTravelSituation({
+      setAiLoading(true);
+      void analyzeTravelSituation({
         officialData,
         pfmData,
         isScooterActive: scooterModeRequested,
         statusIdentifiedCauses: statusDigest?.identifiedCauses,
-        statusScraperSummary,
         rawScraperExcerpt,
-        googleRouteContext: nextPlan.googleRouteContext
-      });
-      setNavigatorInsight(aiResult);
+        googleRouteContext: nextPlan.googleRouteContext,
+        bottleneckMode: statusDigest?.bottleneckMode,
+        routeContextHits: statusDigest?.routeContextHits
+      })
+        .then((aiResult) => setNavigatorInsight(aiResult))
+        .catch(() =>
+          setNavigatorInsight({
+            message:
+              "[PFM FALLBACK] AI-analytikeren nåede ikke frem i tide. Brug pålidelighedsscore og køreplanen på kortene.",
+            isFallback: true,
+            recommendedRouteId: null,
+            alternativeBeatsFavorite: false
+          })
+        )
+        .finally(() => setAiLoading(false));
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Uventet fejl ved planlægning.";
       setError(msg);
-    } finally {
-      setAiLoading(false);
       setLoading(false);
+      setAiLoading(false);
     }
   }
 
@@ -141,10 +148,29 @@ export default function DashboardPage() {
   const effectiveRecommendedRouteId = navigatorInsight?.recommendedRouteId ?? fallbackRecommendedRouteId;
   const shouldUseAutoRecommendation = Boolean(navigatorInsight && !navigatorInsight.recommendedRouteId);
   const showFallbackBranding = Boolean(navigatorInsight?.isFallback);
-  const salsaRouteWarning = Boolean(plan?.statusDigest?.salsaLineRisk && plan?.statusDigest?.incidentCategory !== "NONE");
+  const salsaRouteWarning = Boolean(
+    activeDestination === "SALSA" &&
+      plan?.statusDigest?.routeContextHits?.some((hit) => /metro|s-tog|tog\b/i.test(hit.rawExcerpt))
+  );
+  const bottleneckAlarm = plan?.statusDigest?.bottleneckAlarm;
 
   return (
     <main className="mx-auto flex min-h-screen w-full max-w-md flex-col gap-4 p-4 md:max-w-3xl md:p-6">
+      {bottleneckAlarm?.active && (
+        <section className="rounded-2xl border border-rose-600/70 bg-rose-950/40 p-4">
+          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-rose-200">
+            <AlertTriangle className="h-4 w-4" />
+            Flaskehals-alarm
+          </div>
+          <p className="mt-2 text-sm text-rose-100">
+            Kritisk flaskehals: {bottleneckAlarm.stations.join(", ")} · kilde {bottleneckAlarm.triggerSource}
+          </p>
+          <p className="mt-2 max-h-32 overflow-y-auto border-l-2 border-rose-500/60 pl-3 text-xs text-rose-50/90">
+            {bottleneckAlarm.rawText}
+          </p>
+        </section>
+      )}
+
       <section
         className={`rounded-2xl border p-4 font-mono ${
           showFallbackBranding ? "border-amber-700/60 bg-amber-950/30" : "border-cyan-900/60 bg-slate-950"
@@ -260,9 +286,9 @@ export default function DashboardPage() {
               ))}
             </div>
           )}
-          {plan.statusDigest.salsaLineRisk && (
+          {activeDestination === "SALSA" && plan.statusDigest.routeContextHits.length > 0 && (
             <p className="mt-2 text-xs text-fuchsia-200">
-              M1/M2 eller S-tog C/H: aktiv forstyrrelse registreret — Vanløse/salsa-rute kan være ustabil.
+              Salsa-kryds (S-tog, Metro, tog): scraper rammer stationer på ruten — Vanløse-korridoren overvåges.
             </p>
           )}
           <ul className="mt-3 max-h-40 space-y-2 overflow-y-auto text-xs text-slate-300">

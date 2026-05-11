@@ -1,19 +1,18 @@
 import { PFMResult } from "./pfm";
-import { IncidentCategory } from "./statusScraper";
-import { StatusScrapeSource } from "./statusScraper";
-import { Trip } from "./rejseplanen";
+import { IncidentCategory, RouteContextHit, StatusScrapeSource } from "./statusScraper";
+import { TransitTrip } from "./transit";
 
 export type DashboardDestination = "WORK" | "HOME" | "SALSA";
 
 export interface DashboardRoute {
   id: string;
-  trip: Trip;
+  trip: TransitTrip;
   pfm: PFMResult;
   officialETA: string;
   isBusOrMetroRoute: boolean;
   hasLiveBusRealtime: boolean;
+  isHackerRoute: boolean;
   mapCoordinates: Array<{ lat: number; lng: number; label: string }>;
-  liveVehicleCoordinate?: { lat: number; lng: number; label: string; estimated: boolean };
 }
 
 export interface GoogleRouteInsight {
@@ -29,9 +28,7 @@ export interface GoogleRouteContext {
 export interface PlannerResult {
   routes: DashboardRoute[];
   staleData: boolean;
-  /** Sandt når Google Directions afviser nøglen / quota (vis særskilt fejl, ikke “forældet data”). */
   googleConfigError?: boolean;
-  /** Første fejl eller API-konfiguration — ikke det samme som “forældet data”. */
   loadError?: string;
   staleMessage?: string;
   dataTimestamp?: string;
@@ -52,22 +49,25 @@ export interface PlannerResult {
     lastUpdated: string;
     temperatureC?: number;
     windSpeedMps?: number;
-    /** Nedbørssandsynlighed 0–1 fra Google (time-slot). */
     precipitationProbability?: number;
     precipitationMm?: number;
     summary: string;
   };
-  /** Aggregeret drift fra StatusScraperService (vises på dashboardet). */
   statusDigest?: {
     fetchedAt: string;
     summaryLines: string[];
     identifiedCauses: string[];
-    salsaLineRisk: boolean;
     incidentCategory: IncidentCategory;
-    /** Rå scraper-tekst til Navigator (Gemini), ikke kun opsummerede linjer. */
     rawScraperExcerpt: string;
     sourceLabels: Array<{ source: StatusScrapeSource; count: number; ok: boolean }>;
+    bottleneckAlarm?: {
+      active: boolean;
+      stations: string[];
+      triggerSource: StatusScrapeSource;
+      rawText: string;
+    };
+    routeContextHits: RouteContextHit[];
+    bottleneckMode: boolean;
   };
-  /** Google Directions: varighed og advarsler til Navigator (trafik vs. status-radar). */
   googleRouteContext?: GoogleRouteContext;
 }

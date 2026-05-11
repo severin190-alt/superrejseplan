@@ -1,5 +1,5 @@
 export * from "./api/GoogleTransitDirectionsClient";
-export * from "./types/rejseplanen";
+export * from "./types/transit";
 export * from "./types/pfm";
 export * from "./types/dashboard";
 export * from "./types/statusScraper";

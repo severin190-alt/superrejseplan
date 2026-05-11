@@ -1,19 +1,17 @@
 "use client";
 
-import { Cloud, Heart, Radio, Train, Users } from "lucide-react";
+import {
+  ArrowRightLeft,
+  Bus,
+  Footprints,
+  Heart,
+  Radio,
+  Ship,
+  Train,
+  TrainFront
+} from "lucide-react";
 import { DashboardDestination, DashboardRoute, PlannerResult } from "../types/dashboard";
-
-const statusClasses: Record<DashboardRoute["pfm"]["status"], string> = {
-  GREEN: "bg-emerald-500",
-  YELLOW: "bg-yellow-400",
-  RED: "bg-red-500"
-};
-
-const crowdingLabel: Record<DashboardRoute["pfm"]["crowdingLevel"], string> = {
-  LOW: "Lav",
-  MEDIUM: "Medium",
-  HIGH: "Høj"
-};
+import { TransitLeg, TransitMode } from "../types/transit";
 
 function isHighPrecipitation(weather?: PlannerResult["weatherSnapshot"]): boolean {
   if (!weather) return false;
@@ -21,6 +19,67 @@ function isHighPrecipitation(weather?: PlannerResult["weatherSnapshot"]): boolea
   if (typeof p === "number" && p >= 0.4) return true;
   const mm = weather.precipitationMm;
   return typeof mm === "number" && mm >= 0.4;
+}
+
+function parseClock(value: string | undefined): number | null {
+  if (!value) return null;
+  const match = value.match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) return null;
+  return Number(match[1]) * 60 + Number(match[2]);
+}
+
+function etaDeltaMinutes(officialETA: string, pfmETA: string): number {
+  const official = parseClock(officialETA);
+  const pfm = parseClock(pfmETA);
+  if (official === null || pfm === null) return 0;
+  return (pfm - official + 24 * 60) % (24 * 60);
+}
+
+function modeIcon(mode: TransitMode) {
+  switch (mode) {
+    case "METRO":
+      return TrainFront;
+    case "BUS":
+    case "TOGBUS":
+      return Bus;
+    case "WALK":
+      return Footprints;
+    case "FERRY":
+      return Ship;
+    default:
+      return Train;
+  }
+}
+
+function modeLabel(leg: TransitLeg): string {
+  if (leg.mode === "TOGBUS") return "Togbus";
+  if (leg.mode === "METRO") return `Metro ${leg.line}`;
+  if (leg.mode === "BUS") return `Bus ${leg.line}`;
+  if (leg.mode === "TRAIN") return `Tog ${leg.line}`;
+  if (leg.mode === "WALK") return "Gang";
+  return leg.line;
+}
+
+type TimelineItem =
+  | { kind: "leg"; leg: TransitLeg }
+  | { kind: "transfer"; minutes: number; stop: string };
+
+function buildTimeline(legs: TransitLeg[]): TimelineItem[] {
+  const items: TimelineItem[] = [];
+  for (let i = 0; i < legs.length; i += 1) {
+    const leg = legs[i]!;
+    items.push({ kind: "leg", leg });
+    const next = legs[i + 1];
+    if (!next) continue;
+    const arrival = parseClock(leg.arrivalTime);
+    const departure = parseClock(next.departureTime);
+    if (arrival === null || departure === null) continue;
+    const wait = (departure - arrival + 24 * 60) % (24 * 60);
+    if (wait > 0 && wait < 180) {
+      items.push({ kind: "transfer", minutes: wait, stop: leg.arrivalStop });
+    }
+  }
+  return items;
 }
 
 function cardShellClass(args: {
@@ -43,11 +102,6 @@ function cardShellClass(args: {
   return `w-full rounded-2xl border border-slate-800 bg-slate-900 p-4 text-left ${ring}`;
 }
 
-function statusBarClass(route: DashboardRoute, unstable: boolean): string {
-  if (unstable) return "bg-red-600";
-  return statusClasses[route.pfm.status];
-}
-
 export function DecisionCard({
   route,
   onSelect,
@@ -66,53 +120,141 @@ export function DecisionCard({
   const unstable = Boolean(route.pfm.unstable);
   const salsaTrip = activeDestination === "SALSA";
   const precip = isHighPrecipitation(weatherSnapshot);
+  const delta = etaDeltaMinutes(route.officialETA, route.pfm.pfmETA);
+  const timeline = buildTimeline(route.trip.legs);
 
   return (
     <button type="button" onClick={onSelect} className={cardShellClass({ unstable, salsaTrip, precip, selected })}>
-      <div className={`h-2 w-full rounded-full ${statusBarClass(route, unstable)}`} />
-      <div className="mt-3 flex items-center justify-between">
-        <div className="flex items-center gap-2 text-xs text-slate-400">
-          <Train className="h-4 w-4" />
-          <span>Officiel vs PFM</span>
-        </div>
-        <div className="flex items-center gap-2">
-          {aiRecommended && (
-            <span className="inline-flex items-center rounded-full bg-cyan-500/20 px-2 py-1 text-xs font-semibold text-cyan-200">
-              AI RECOMMENDED
-            </span>
-          )}
-          {route.pfm.isFavoriteRoute && (
-            <span className="inline-flex items-center gap-1 rounded-full bg-pink-500/20 px-2 py-1 text-xs text-pink-200">
-              <Heart className="h-3 w-3" />
-              Favorit
-            </span>
-          )}
-        </div>
-      </div>
-      <div className="mt-2 flex items-end gap-2">
-        <span className="text-lg font-semibold text-slate-300">{route.officialETA}</span>
-        {route.isBusOrMetroRoute && route.hasLiveBusRealtime && (
-          <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/20 px-2 py-0.5 text-[10px] font-semibold text-emerald-200">
-            <Radio className="h-3 w-3" />
-            Live
-          </span>
-        )}
-        <span className="text-xs text-slate-500">-&gt;</span>
-        <span className="text-3xl font-bold">{route.pfm.pfmETA}</span>
-      </div>
+      <RouteScoreHeader reliability={route.pfm.reliabilityScore} delta={delta} unstable={unstable} />
+      <RouteTimeline timeline={timeline} />
+      <RouteBadges route={route} aiRecommended={aiRecommended} />
       <p className="mt-3 text-sm text-slate-200">{route.pfm.delayReason}</p>
-      <div className="mt-3 flex items-center justify-between text-xs text-slate-300">
-        <span className="inline-flex items-center gap-1">
-          <Users className="h-4 w-4" />
-          {crowdingLabel[route.pfm.crowdingLevel]}
-        </span>
-        {route.pfm.scooterOption.weatherWarning && (
-          <span className="inline-flex items-center gap-1 text-amber-300">
-            <Cloud className="h-4 w-4" />
-            Rain-check
-          </span>
-        )}
-      </div>
     </button>
   );
+}
+
+function RouteScoreHeader({
+  reliability,
+  delta,
+  unstable
+}: {
+  reliability: number;
+  delta: number;
+  unstable: boolean;
+}) {
+  const label = delta === 0 ? "0 min" : `+${delta} min`;
+  return (
+    <div className="border-b border-slate-700/60 pb-3">
+      <div className="flex items-end justify-between gap-3">
+        <div>
+          <p className="text-[11px] uppercase tracking-wide text-slate-400">Pålidelighed</p>
+          <p className={`text-3xl font-bold ${unstable ? "text-red-300" : "text-emerald-300"}`}>{reliability}%</p>
+        </div>
+        <MotionDelta label={label} />
+      </div>
+    </div>
+  );
+}
+
+function RouteTimeline({ timeline }: { timeline: TimelineItem[] }) {
+  return (
+    <ol className="relative mt-4 space-y-0 border-l border-slate-700 pl-4">
+      {timeline.map((item, index) => {
+        if (item.kind === "transfer") {
+          return (
+            <li key={`transfer-${index}`} className="relative pb-4">
+              <span className="absolute -left-[1.34rem] top-1 h-2.5 w-2.5 rounded-full bg-amber-300" />
+              <div className="flex items-center gap-2 text-xs text-slate-400">
+                <ArrowRightLeft className="h-4 w-4 shrink-0 text-amber-300" />
+                <span>
+                  Skift · {item.minutes} min på {item.stop}
+                </span>
+              </div>
+            </li>
+          );
+        }
+        return (
+          <li key={`leg-${index}`} className="relative pb-4">
+            <span className="absolute -left-[1.34rem] top-1 h-2.5 w-2.5 rounded-full bg-cyan-300" />
+            <LegRow leg={item.leg} />
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+function LegRow({ leg }: { leg: TransitLeg }) {
+  const Icon = modeIcon(leg.mode);
+  const dep = leg.departureTime ?? "--:--";
+  const arr = leg.arrivalTime ?? "--:--";
+  const live =
+    leg.hasLiveTiming &&
+    (leg.mode === "BUS" || leg.mode === "METRO" || leg.mode === "TRAIN" || leg.mode === "TOGBUS");
+
+  return (
+    <div className="flex items-start gap-2">
+      <Icon className="mt-0.5 h-4 w-4 shrink-0 text-cyan-300" />
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-medium text-slate-100">{modeLabel(leg)}</p>
+        <p className="text-xs text-slate-400">
+          {dep} → {arr}
+        </p>
+        {leg.mode === "WALK" ? (
+          <p className="mt-1 text-xs text-slate-300">
+            {leg.walkDistanceText ? `Gå ${leg.walkDistanceText}` : "Gang"}
+            {leg.durationMinutes ? ` · ca. ${leg.durationMinutes} min` : ""}
+          </p>
+        ) : (
+          <p className="mt-1 text-xs text-slate-300">
+            {leg.departureStop} → {leg.arrivalStop}
+            {leg.departurePlatform ? ` · Perron ${leg.departurePlatform}` : ""}
+            {leg.headsign ? ` · mod ${leg.headsign}` : ""}
+          </p>
+        )}
+      </div>
+      {live && (
+        <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/20 px-2 py-0.5 text-[10px] font-semibold text-emerald-200">
+          <Radio className="h-3 w-3" />
+          Live
+        </span>
+      )}
+    </div>
+  );
+}
+
+function RouteBadges({ route, aiRecommended }: { route: DashboardRoute; aiRecommended: boolean }) {
+  return (
+    <MotionBadges>
+      {aiRecommended && (
+        <span className="inline-flex items-center rounded-full bg-cyan-500/20 px-2 py-1 text-xs font-semibold text-cyan-200">
+          AI RECOMMENDED
+        </span>
+      )}
+      {route.isHackerRoute && (
+        <span className="inline-flex items-center rounded-full bg-orange-500/20 px-2 py-1 text-xs font-semibold text-orange-200">
+          HACKER-RUTE
+        </span>
+      )}
+      {route.pfm.isFavoriteRoute && (
+        <span className="inline-flex items-center gap-1 rounded-full bg-pink-500/20 px-2 py-1 text-xs text-pink-200">
+          <Heart className="h-3 w-3" />
+          Ørestad-hub
+        </span>
+      )}
+    </MotionBadges>
+  );
+}
+
+function MotionDelta({ label }: { label: string }) {
+  return (
+    <div className="text-right">
+      <p className="text-[11px] uppercase tracking-wide text-slate-400">PFM vs Google</p>
+      <p className="text-2xl font-semibold text-amber-200">{label}</p>
+    </div>
+  );
+}
+
+function MotionBadges({ children }: { children: React.ReactNode }) {
+  return <div className="mt-3 flex flex-wrap items-center gap-2">{children}</div>;
 }

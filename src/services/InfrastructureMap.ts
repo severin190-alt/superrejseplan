@@ -1,4 +1,4 @@
-import { HIMMessage, Leg } from "../types/rejseplanen";
+import { StatusMessage, TransitLeg } from "../types/transit";
 
 type LineMapping = {
   keys: string[];
@@ -49,13 +49,11 @@ const LINE_MAPPINGS: LineMapping[] = [
   }
 ];
 
-/** Kanoniske linje-tokens til planlagte hændelser ↔ rute-match (ingen hardcodede buslister). */
+const MOVIA_BUS_LINE = /^[0-9]+[SCA]?$/i;
+
 export type CanonicalLineToken = string;
 
 export class InfrastructureMap {
-  /**
-   * Udleder kanoniske linje-ID'er: METRO:M1–M4, STOG:A–H, BUS:<tal>[A|C|S]? , RE, IC.
-   */
   extractCanonicalLineTokens(raw: string): CanonicalLineToken[] {
     const found = new Set<CanonicalLineToken>();
     const upper = raw.toUpperCase();
@@ -72,21 +70,22 @@ export class InfrastructureMap {
     for (const m of raw.matchAll(/\b(RE|IC)\b/gi)) {
       found.add(m[1].toUpperCase());
     }
-    for (const m of raw.matchAll(/\b(\d{1,3})([ACS])?\b/gi)) {
-      const num = m[1];
-      const suf = (m[2] ?? "").toUpperCase();
-      if (/^0+$/.test(num)) continue;
-      const n = Number(num);
-      if (n < 1 || n > 999) continue;
-      found.add(`BUS:${num}${suf}`);
+    for (const m of raw.matchAll(/\b(\d{1,3})([SCA])?\b/gi)) {
+      const line = `${m[1]}${(m[2] ?? "").toUpperCase()}`;
+      if (MOVIA_BUS_LINE.test(line)) {
+        found.add(`BUS:${line}`);
+      }
     }
     return [...found];
   }
 
-  /** Sand hvis rute-tekst matcher et kanonisk BUS:-token (ikke togbus-kontekst alene). */
   routeHasRegularBusLine(routeText: string): boolean {
     const tokens = this.extractCanonicalLineTokens(routeText);
     return tokens.some((t) => t.startsWith("BUS:"));
+  }
+
+  isMoviaBusLine(line: string): boolean {
+    return MOVIA_BUS_LINE.test(line.trim());
   }
 
   sanitizeText(text: string): string {
@@ -102,7 +101,7 @@ export class InfrastructureMap {
       .trim();
   }
 
-  messageAffectsRoute(message: HIMMessage, legs: Leg[]): boolean {
+  messageAffectsRoute(message: StatusMessage, legs: TransitLeg[]): boolean {
     const mappedStations = this.getMappedStations(message);
     if (mappedStations.size === 0) {
       return false;
@@ -116,7 +115,7 @@ export class InfrastructureMap {
     return false;
   }
 
-  isVestbanenCancellation(message: HIMMessage): boolean {
+  isVestbanenCancellation(message: StatusMessage): boolean {
     const text = this.sanitizeText(`${message.header ?? ""} ${message.content ?? ""}`);
     const mentionsVestbanen =
       text.includes("vestbanen") ||
@@ -126,7 +125,7 @@ export class InfrastructureMap {
     return mentionsVestbanen && cancelled;
   }
 
-  isBusOrMetroRoute(legs: Leg[], journeyName?: string): boolean {
+  isBusOrMetroRoute(legs: TransitLeg[], journeyName?: string): boolean {
     const notesText = this.routeText(legs, journeyName);
     return (
       notesText.includes("bus") ||
@@ -135,30 +134,27 @@ export class InfrastructureMap {
       notesText.includes("m2") ||
       notesText.includes("m3") ||
       notesText.includes("m4") ||
-      notesText.includes("5c") ||
-      /\b\d{1,3}s?\b/.test(notesText)
+      legs.some((leg) => leg.mode === "BUS" || leg.mode === "METRO" || leg.mode === "TOGBUS")
     );
   }
 
-  isRoskildeKbhBusCorridor(legs: Leg[], journeyName?: string): boolean {
+  isRoskildeKbhBusCorridor(legs: TransitLeg[], journeyName?: string): boolean {
     const stations = this.getRouteStations(legs);
     const hasRoskilde = stations.has("roskilde");
     const hasCopenhagenArea = stations.has("københavn h") || stations.has("kobenhavn h") || stations.has("valby");
     const notesText = this.routeText(legs, journeyName);
-    const knownLines = ["123", "212", "250s"];
-    const hasKnownLine = knownLines.some((line) => notesText.includes(line));
-    return hasRoskilde && hasCopenhagenArea && (hasKnownLine || notesText.includes("bus"));
+    const hasMoviaBus = legs.some((leg) => this.isMoviaBusLine(leg.line));
+    return hasRoskilde && hasCopenhagenArea && (hasMoviaBus || notesText.includes("bus"));
   }
 
-  hasRealtimeForBusLeg(legs: Leg[], journeyName?: string): boolean {
+  hasRealtimeForBusLeg(legs: TransitLeg[], journeyName?: string): boolean {
     return legs.some((leg) => {
-      const notesText = this.routeText([leg], journeyName);
-      const likelyBusLeg = notesText.includes("bus") || this.looksLikeBusLine(notesText);
-      return likelyBusLeg && Boolean(leg.rtDepartureTime || leg.rtArrivalTime || leg.Origin?.rtTime || leg.Destination?.rtTime);
+      const likelyBusLeg = leg.mode === "BUS" || leg.mode === "TOGBUS" || this.isMoviaBusLine(leg.line);
+      return likelyBusLeg && Boolean(leg.departureTime || leg.arrivalTime);
     });
   }
 
-  private getMappedStations(message: HIMMessage): Set<string> {
+  private getMappedStations(message: StatusMessage): Set<string> {
     const text = this.sanitizeText(`${message.header ?? ""} ${message.content ?? ""}`);
     const stationSet = new Set<string>();
     for (const mapping of LINE_MAPPINGS) {
@@ -169,11 +165,11 @@ export class InfrastructureMap {
     return stationSet;
   }
 
-  private getRouteStations(legs: Leg[]): Set<string> {
+  private getRouteStations(legs: TransitLeg[]): Set<string> {
     const set = new Set<string>();
     for (const leg of legs) {
-      set.add(this.normalize(leg.Origin?.name ?? ""));
-      set.add(this.normalize(leg.Destination?.name ?? ""));
+      set.add(this.normalize(leg.departureStop));
+      set.add(this.normalize(leg.arrivalStop));
     }
     return set;
   }
@@ -182,16 +178,9 @@ export class InfrastructureMap {
     return this.sanitizeText(value);
   }
 
-  private routeText(legs: Leg[], journeyName?: string): string {
-    const notes = legs
-      .flatMap((leg) => this.toArray(leg.Notes?.Note))
-      .map((n) => n.value ?? "")
-      .join(" ");
-    return this.normalize(`${journeyName ?? ""} ${notes}`);
-  }
-
-  private looksLikeBusLine(text: string): boolean {
-    return this.extractCanonicalLineTokens(text).some((t) => t.startsWith("BUS:"));
+  private routeText(legs: TransitLeg[], journeyName?: string): string {
+    const lines = legs.map((leg) => `${leg.line} ${leg.departureStop} ${leg.arrivalStop}`).join(" ");
+    return this.normalize(`${journeyName ?? ""} ${lines}`);
   }
 
   private matchesLineKey(text: string, key: string): boolean {
@@ -208,10 +197,5 @@ export class InfrastructureMap {
       return re.test(text);
     }
     return text.includes(keyTrim);
-  }
-
-  private toArray<T>(value: T | T[] | undefined): T[] {
-    if (!value) return [];
-    return Array.isArray(value) ? value : [value];
   }
 }

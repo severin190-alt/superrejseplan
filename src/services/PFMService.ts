@@ -1,5 +1,5 @@
-import { Departure, HIMMessage, Leg } from "../types/rejseplanen";
-import { DispositionRiskResult, PFMContext, PFMEvaluationInput, PFMResult } from "../types/pfm";
+import { StatusMessage, TransitLeg } from "../types/transit";
+import { PFMContext, PFMEvaluationInput, PFMResult } from "../types/pfm";
 import { InfrastructureMap } from "./InfrastructureMap";
 
 type ParsedIncidentSignal = {
@@ -27,8 +27,7 @@ export class PFMService {
 
   evaluateTrip(input: PFMEvaluationInput): PFMResult {
     const now = input.context?.now ?? new Date();
-    const trip = input.trip;
-    const legs = this.toArray<Leg>(trip.Leg);
+    const legs = input.trip.legs;
     const officialETA = this.getOfficialETA(legs);
 
     const penalties: number[] = [];
@@ -55,7 +54,7 @@ export class PFMService {
     penalties.push(recoveryPenalty);
 
     const busOrMetroRoute = this.infrastructureMap.isBusOrMetroRoute(legs, input.context?.journeyName);
-    const incidentOutcome = this.applyIncidentWeighting(input.context?.himMessages, legs, now, busOrMetroRoute);
+    const incidentOutcome = this.applyIncidentWeighting(input.context?.statusMessages, legs, now, busOrMetroRoute);
     penalties.push(incidentOutcome.penaltyMinutes);
     reasons.push(...incidentOutcome.reasons);
     unstable = unstable || incidentOutcome.unstable;
@@ -66,12 +65,34 @@ export class PFMService {
       reasons.push("Togbus dead-zone aktiv (90-120 min)");
     }
 
-    if (!busOrMetroRoute && this.hasValbyCopenhagenBottleneckSignalIssue(legs, input.context?.himMessages)) {
+    if (input.context?.routeUsesTogbus) {
+      const acuteBreakdown =
+        input.context.routeIncidentCategory === "LONG" ||
+        unstable ||
+        (input.context.statusIdentifiedCauses ?? []).some((cause) =>
+          /personp[åa]k[øo]rsel|personpaakorsel|signalfejl|kabelfejl|styresystem/i.test(cause)
+        );
+      const togbusPenalty = acuteBreakdown ? 120 : 20;
+      penalties.push(togbusPenalty);
+      reliabilityScore = Math.min(reliabilityScore, acuteBreakdown ? 10 : 30);
+      reasons.push(
+        acuteBreakdown
+          ? "Akut nedbrud + togbus: +120 min og næsten ingen pålidelighed"
+          : "Proppet-straf for togbus (+20 min); togbusser kører sjældent til tiden"
+      );
+    }
+
+    if (input.context?.routeUsesRegularBus && !input.context?.routeUsesTogbus) {
+      reliabilityScore = Math.min(100, reliabilityScore + 12);
+      reasons.push("Movia-bus: crowding-bonus over togbus");
+    }
+
+    if (!busOrMetroRoute && this.hasValbyCopenhagenBottleneckSignalIssue(legs, input.context?.statusMessages)) {
       reliabilityScore -= 20;
       reasons.push("Signalfejl i flaskehalsen Valby-København H");
     }
 
-    if (!busOrMetroRoute && this.hasMaterialShortage(legs, input.context?.himMessages)) {
+    if (!busOrMetroRoute && this.hasMaterialShortage(legs, input.context?.statusMessages)) {
       reliabilityScore -= 40;
       reasons.push("Materielmangel giver længere stationstider");
     }
@@ -85,10 +106,10 @@ export class PFMService {
     const isFavoriteRoute = this.isFavoriteRoute(legs);
     if (isFavoriteRoute) {
       reliabilityScore += 15;
-      reasons.push("Favorit-rute comfort bonus");
+      reasons.push("Favorit-rute comfort bonus (Ørestad-hub)");
     }
 
-    const crowding = this.computeCrowding(legs, input.context?.himMessages, now, input.context?.journeyName);
+    const crowding = this.computeCrowding(legs, input.context?.statusMessages, now, input.context?.journeyName);
     if (crowding.penalty > 0) {
       reliabilityScore -= crowding.penalty;
       reasons.push(crowding.reason);
@@ -122,37 +143,6 @@ export class PFMService {
       isFavoriteRoute,
       crowdingLevel: crowding.level,
       scooterOption
-    };
-  }
-
-  detectDispositionRisk(departures: Departure[], directionHint = "Roskilde"): DispositionRiskResult {
-    const relevant = departures.filter((dep) =>
-      (dep.direction ?? "").toLowerCase().includes(directionHint.toLowerCase())
-    );
-
-    if (relevant.length < 3) {
-      return {
-        highRisk: false,
-        probability: 0,
-        reason: "For få afgange til at vurdere disponering"
-      };
-    }
-
-    const firstTwoBad = this.isCancelledOrSeverelyDelayed(relevant[0]) &&
-      this.isCancelledOrSeverelyDelayed(relevant[1]);
-
-    if (!firstTwoBad) {
-      return {
-        highRisk: false,
-        probability: 0,
-        reason: "Mønster for huls-aflysninger er ikke aktivt"
-      };
-    }
-
-    return {
-      highRisk: true,
-      probability: 0.9,
-      reason: "To på hinanden følgende afgange er aflyst/forsinket >20 min; tredje afgang er high risk"
     };
   }
 
@@ -201,11 +191,11 @@ export class PFMService {
         reasons.push("Kritisk fejl. Find alternativ rute med det samme!");
       }
       if (usesTogbus) {
-        reasons.push("Togbusser forventes overfyldte (+20 i valg-score efter øvrige beregninger)");
+        reasons.push("Togbusser forventes overfyldte — gå udenom hvis du kan");
       }
       return {
-        penaltyMinutes: 40,
-        reliabilityCap: 20,
+        penaltyMinutes: 120,
+        reliabilityCap: 10,
         unstable: true,
         suggestBusAlternative: true
       };
@@ -279,8 +269,8 @@ export class PFMService {
   }
 
   private applyIncidentWeighting(
-    messages: HIMMessage[] | undefined,
-    legs: Leg[],
+    messages: StatusMessage[] | undefined,
+    legs: TransitLeg[],
     now: Date,
     busOrMetroRoute: boolean
   ): {
@@ -397,7 +387,7 @@ export class PFMService {
     return null;
   }
 
-  private hasMaterialShortage(legs: Leg[], messages: HIMMessage[] | undefined): boolean {
+  private hasMaterialShortage(legs: TransitLeg[], messages: StatusMessage[] | undefined): boolean {
     return (messages ?? [])
       .filter((msg) => this.isMessageInGeofence(msg))
       .filter((msg) => this.infrastructureMap.messageAffectsRoute(msg, legs))
@@ -407,21 +397,21 @@ export class PFMService {
       });
   }
 
-  private hasValbyCopenhagenBottleneckSignalIssue(legs: Leg[], messages: HIMMessage[] | undefined): boolean {
+  private hasValbyCopenhagenBottleneckSignalIssue(legs: TransitLeg[], messages: StatusMessage[] | undefined): boolean {
     const hasSignalIssue = (messages ?? [])
       .filter((msg) => this.isMessageInGeofence(msg))
       .filter((msg) => this.infrastructureMap.messageAffectsRoute(msg, legs))
       .some((msg) => {
-      const text = `${msg.header ?? ""} ${msg.content ?? ""}`.toLowerCase();
-      return text.includes("signalfejl");
-    });
+        const text = `${msg.header ?? ""} ${msg.content ?? ""}`.toLowerCase();
+        return text.includes("signalfejl");
+      });
     if (!hasSignalIssue) {
       return false;
     }
 
     return legs.some((leg) => {
-      const from = (leg.Origin?.name ?? "").toLowerCase();
-      const to = (leg.Destination?.name ?? "").toLowerCase();
+      const from = leg.departureStop.toLowerCase();
+      const to = leg.arrivalStop.toLowerCase();
       const valby = "valby";
       const kh = "københavn h";
       const khAlt = "kobenhavn h";
@@ -432,27 +422,12 @@ export class PFMService {
     });
   }
 
-  private isCancelledOrSeverelyDelayed(dep: Departure): boolean {
-    const notes = `${dep.messages ?? ""}`.toLowerCase();
-    if (notes.includes("aflyst") || notes.includes("cancel")) {
-      return true;
-    }
-
-    const scheduled = this.parseClock(dep.time);
-    const realtime = this.parseClock(dep.rtTime ?? dep.time);
-    if (!scheduled || !realtime) {
-      return false;
-    }
-    const diff = realtime - scheduled;
-    return diff > 20;
-  }
-
-  private getOfficialETA(legs: Leg[]): string {
+  private getOfficialETA(legs: TransitLeg[]): string {
     const lastLeg = legs[legs.length - 1];
     if (!lastLeg) {
       return "00:00";
     }
-    return lastLeg.rtArrivalTime ?? lastLeg.Destination?.rtTime ?? lastLeg.Destination?.time ?? "00:00";
+    return lastLeg.arrivalTime ?? "00:00";
   }
 
   private parseClock(value: string | undefined): number | null {
@@ -508,18 +483,11 @@ export class PFMService {
     return "GREEN";
   }
 
-  private toArray<T>(value: T | T[] | undefined): T[] {
-    if (!value) {
-      return [];
-    }
-    return Array.isArray(value) ? value : [value];
-  }
-
   private clamp(value: number, min: number, max: number): number {
     return Math.max(min, Math.min(max, value));
   }
 
-  private isMessageInGeofence(message: HIMMessage): boolean {
+  private isMessageInGeofence(message: StatusMessage): boolean {
     const header = message.header ?? "";
     if (/^(DSB Akut|Metro|Rejseplanen\s*\(|StatusRadar)/.test(header)) {
       return true;
@@ -528,8 +496,8 @@ export class PFMService {
     return PFMService.GEOFENCE_NODES.some((node) => text.includes(node));
   }
 
-  private isFavoriteRoute(legs: Leg[]): boolean {
-    const names = legs.flatMap((leg) => [(leg.Origin?.name ?? "").toLowerCase(), (leg.Destination?.name ?? "").toLowerCase()]);
+  private isFavoriteRoute(legs: TransitLeg[]): boolean {
+    const names = legs.flatMap((leg) => [leg.departureStop.toLowerCase(), leg.arrivalStop.toLowerCase()]);
     const hasBella = names.some((n) => n.includes("bella center"));
     const hasOrestad = names.some((n) => n.includes("ørestad") || n.includes("oerestad"));
     const hasRoskilde = names.some((n) => n.includes("roskilde"));
@@ -537,8 +505,8 @@ export class PFMService {
   }
 
   private computeCrowding(
-    legs: Leg[],
-    messages: HIMMessage[] | undefined,
+    legs: TransitLeg[],
+    messages: StatusMessage[] | undefined,
     now: Date,
     journeyName?: string
   ): {
@@ -553,8 +521,8 @@ export class PFMService {
       (minutes >= 7 * 60 + 30 && minutes <= 8 * 60 + 30) ||
       (minutes >= 15 * 60 + 30 && minutes <= 17 * 60);
     const viaKbhH = legs.some((leg) => {
-      const from = (leg.Origin?.name ?? "").toLowerCase();
-      const to = (leg.Destination?.name ?? "").toLowerCase();
+      const from = leg.departureStop.toLowerCase();
+      const to = leg.arrivalStop.toLowerCase();
       return from.includes("københavn h") || from.includes("kobenhavn h") || to.includes("københavn h") || to.includes("kobenhavn h");
     });
 
@@ -608,7 +576,7 @@ export class PFMService {
       return { feasible: false, weatherWarning: true };
     }
 
-    const weatherText = `${context?.weatherCondition ?? ""} ${(context?.himMessages ?? [])
+    const weatherText = `${context?.weatherCondition ?? ""} ${(context?.statusMessages ?? [])
       .map((m) => `${m.header ?? ""} ${m.content ?? ""}`)
       .join(" ")}`.toLowerCase();
     const badWeather = weatherText.includes("regn") || weatherText.includes("sne");

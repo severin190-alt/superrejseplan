@@ -11,24 +11,26 @@ export type IncidentCategory = "NONE" | "SHORT" | "LONG";
 
 export interface StatusScrapeSection {
   source: StatusScrapeSource;
-  /** e.g. bus, metro, s-tog */
   sectionId?: string;
   text: string;
+}
+
+export interface RouteContextHit {
+  stopName: string;
+  source: StatusScrapeSource;
+  rawExcerpt: string;
+  incidentCategory: IncidentCategory;
+}
+
+export interface RouteContextResult {
+  hits: RouteContextHit[];
+  incidentCategory: IncidentCategory;
+  identifiedCauses: string[];
+  alarmActive: boolean;
 }
 
 export interface StatusScrapeReport {
   fetchedAt: string;
   sections: StatusScrapeSection[];
-  identifiedCauses: string[];
-  incidentCategory: IncidentCategory;
-  plannedAlerts: Array<{
-    source: StatusScrapeSource;
-    lineIds: string[];
-    dateTokens: string[];
-    category: IncidentCategory;
-    text: string;
-  }>;
-  /** True when disruption wording affects M1/M2 or S-tog C/H (salsa / Vanløse relevance). */
-  salsaLineRisk: boolean;
   errors: Array<{ source: StatusScrapeSource; message: string }>;
 }

@@ -1,5 +1,5 @@
-import { Departure, HIMMessage, Trip } from "../types/rejseplanen";
-import { DispositionRiskResult, PFMContext, PFMResult } from "../types/pfm";
+import { StatusMessage, TransitTrip } from "../types/transit";
+import { PFMContext, PFMResult } from "../types/pfm";
 import { PFMService } from "./PFMService";
 
 export class PFMEngine {
@@ -9,49 +9,16 @@ export class PFMEngine {
     this.service = service ?? new PFMService();
   }
 
-  evaluateTrip(trip: Trip, context?: PFMContext): PFMResult {
+  evaluateTrip(trip: TransitTrip, context?: PFMContext): PFMResult {
     return this.service.evaluateTrip({ trip, context });
   }
 
-  detectDispositionRisk(departures: Departure[], directionHint?: string): DispositionRiskResult {
-    return this.service.detectDispositionRisk(departures, directionHint);
-  }
-
-  evaluateBatch(trips: Trip[], context?: PFMContext): PFMResult[] {
+  evaluateBatch(trips: TransitTrip[], context?: PFMContext): PFMResult[] {
     return trips.map((trip) => this.evaluateTrip(trip, context));
   }
 
-  extractRelevantMessages(messages: HIMMessage[]): HIMMessage[] {
-    return messages.filter((msg) => {
-      const header = msg.header ?? "";
-      if (/^(DSB|Metro|Rejseplanen|Lokaltog|DOT)/.test(header)) {
-        return true;
-      }
-      const text = `${header} ${msg.content ?? ""}`.toLowerCase();
-      return (
-        text.includes("roskilde") ||
-        text.includes("høje taastrup") ||
-        text.includes("hoeje taastrup") ||
-        text.includes("glostrup") ||
-        text.includes("valby") ||
-        text.includes("københavn h") ||
-        text.includes("kobenhavn h") ||
-        text.includes("ørestad") ||
-        text.includes("oerestad") ||
-        text.includes("vanløse") ||
-        text.includes("vanlose") ||
-        text.includes("personpåkørsel") ||
-        text.includes("signalfejl") ||
-        text.includes("sporarbejde") ||
-        text.includes("mangel på togpersonale") ||
-        text.includes("blade på skinnerne") ||
-        text.includes("strømsvigt") ||
-        text.includes("materielmangel") ||
-        text.includes("kort tog") ||
-        text.includes("regn") ||
-        text.includes("sne")
-      );
-    });
+  extractRelevantMessages(messages: StatusMessage[]): StatusMessage[] {
+    return messages;
   }
 
   computeTripQueryOverrides(context?: PFMContext): { useMetro: "0" | "1"; message?: string } {

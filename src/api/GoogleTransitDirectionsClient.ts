@@ -1,4 +1,4 @@
-import { Leg, Trip } from "../types/rejseplanen";
+import { TransitLeg, TransitMode, TransitTrip } from "../types/transit";
 import { FIXED_LOCATIONS } from "../config/constants";
 
 type GoogleLatLng = { lat: number; lng: number };
@@ -14,11 +14,15 @@ type GoogleTransitDetails = {
   arrival_time?: GoogleTimeValue;
   line?: { name?: string; short_name?: string };
   headsign?: string;
+  vehicle?: { type?: string; name?: string };
+  num_stops?: number;
 };
 
 type GoogleStep = {
   travel_mode: string;
   html_instructions?: string;
+  distance?: { value: number; text?: string };
+  duration?: { value: number; text?: string };
   transit_details?: GoogleTransitDetails;
 };
 
@@ -102,21 +106,70 @@ function isGoogleConfigFailureStatus(status: string): boolean {
   return status === "REQUEST_DENIED" || status === "OVER_QUERY_LIMIT";
 }
 
+function stripHtml(value: string): string {
+  return value
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function parsePlatform(instructions: string): string | undefined {
+  const match = instructions.match(/\b(?:perron|spor|platform)\s*([a-z0-9]+)/i);
+  return match?.[1]?.toUpperCase();
+}
+
+function isTogbusContext(line: string, headsign: string): boolean {
+  const blob = `${line} ${headsign}`.toLowerCase();
+  return /\btogbus\b|\btog\s+bus\b|rail\s+replacement|erstatningsbus/.test(blob);
+}
+
+function mapVehicleType(vehicleType: string | undefined, line: string, headsign: string): TransitMode {
+  if (isTogbusContext(line, headsign)) {
+    return "TOGBUS";
+  }
+  const normalized = (vehicleType ?? "").toUpperCase();
+  if (normalized.includes("SUBWAY") || normalized.includes("METRO")) return "METRO";
+  if (normalized.includes("TRAIN") || normalized.includes("RAIL") || normalized.includes("TRAM")) return "TRAIN";
+  if (normalized.includes("BUS")) return "BUS";
+  if (normalized.includes("FERRY")) return "FERRY";
+  return "OTHER";
+}
+
+export type TransitRoutingPreference = "LESS_WALKING" | "FEWER_TRANSFERS";
+
 export type TransitTripBundle = {
-  trip: Trip;
+  trip: TransitTrip;
   mapCoordinates: Array<{ lat: number; lng: number; label: string }>;
   journeyName?: string;
   durationSeconds: number;
   durationSummary: string;
   warnings: string[];
+  routingPreference?: TransitRoutingPreference;
+  hackerVariant?: "BUS" | "WAYPOINT_KOGE_NORD" | "WAYPOINT_VANLOSE";
+};
+
+type DirectionsQueryOptions = {
+  routingPreference?: TransitRoutingPreference;
+  transitMode?: "bus" | "rail" | "subway" | "train" | "tram";
+  waypoint?: string;
 };
 
 export class GoogleTransitDirectionsClient {
   constructor(private readonly apiKey?: string) {}
 
-  /**
-   * Intern sanity-check: samme nøgle skal kunne hente transit fra hjem-adresse til Roskilde St.
-   */
+  private resolveApiKey(): string {
+    const key = this.apiKey ?? process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY ?? "";
+    if (!key) {
+      throw new GoogleTransitDirectionsError(
+        "Mangler NEXT_PUBLIC_GOOGLE_MAPS_API_KEY. Aktivér Directions API i Google Cloud og tilføj nøglen.",
+        { kind: "config", status: "MISSING_KEY" }
+      );
+    }
+    return key;
+  }
+
   async verifyDirectionsAccess(): Promise<DirectionsAccessGate> {
     const key = this.apiKey ?? process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY ?? "";
     if (!key) {
@@ -153,15 +206,56 @@ export class GoogleTransitDirectionsClient {
 
   async getTransitTrips(
     origin: { lat: number; lng: number },
+    destination: string,
+    options?: DirectionsQueryOptions
+  ): Promise<TransitTripBundle[]> {
+    const data = await this.fetchDirections(origin, destination, options);
+    return data.routes?.map((route) => this.routeToBundle(route, options)) ?? [];
+  }
+
+  async getTransitTripVariants(
+    origin: { lat: number; lng: number },
+    destination: string,
+    bottleneckMode: boolean
+  ): Promise<TransitTripBundle[]> {
+    const preferences: Array<DirectionsQueryOptions | undefined> = bottleneckMode
+      ? [{}, { routingPreference: "LESS_WALKING" }, { routingPreference: "FEWER_TRANSFERS" }]
+      : [{}];
+    const settled = await Promise.allSettled(
+      preferences.map((options) => this.getTransitTrips(origin, destination, options))
+    );
+    return this.mergeBundles(settled);
+  }
+
+  async getHackerTransitTrips(
+    origin: { lat: number; lng: number },
     destination: string
   ): Promise<TransitTripBundle[]> {
-    const key = this.apiKey ?? process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY ?? "";
-    if (!key) {
-      throw new GoogleTransitDirectionsError(
-        "Mangler NEXT_PUBLIC_GOOGLE_MAPS_API_KEY. Aktivér Directions API i Google Cloud og tilføj nøglen.",
-        { kind: "config", status: "MISSING_KEY" }
-      );
-    }
+    const variants: Array<{ options: DirectionsQueryOptions; hackerVariant: TransitTripBundle["hackerVariant"] }> = [
+      { options: { transitMode: "bus" }, hackerVariant: "BUS" },
+      { options: { waypoint: "Køge Nord St., Danmark" }, hackerVariant: "WAYPOINT_KOGE_NORD" },
+      { options: { waypoint: "Vanløse St., Danmark" }, hackerVariant: "WAYPOINT_VANLOSE" }
+    ];
+    const settled = await Promise.allSettled(
+      variants.map(async ({ options, hackerVariant }) => {
+        const bundles = await this.getTransitTrips(origin, destination, options);
+        return bundles.map((bundle) => ({ ...bundle, hackerVariant }));
+      })
+    );
+    const merged = this.mergeBundles(
+      settled.map((outcome) =>
+        outcome.status === "fulfilled" ? { status: "fulfilled" as const, value: outcome.value } : outcome
+      )
+    );
+    return merged;
+  }
+
+  private async fetchDirections(
+    origin: { lat: number; lng: number },
+    destination: string,
+    options?: DirectionsQueryOptions
+  ): Promise<GoogleDirectionsResponse> {
+    const key = this.resolveApiKey();
     const originStr = `${origin.lat},${origin.lng}`;
     const departureTime = Math.floor(Date.now() / 1000);
     const url = new URL("https://maps.googleapis.com/maps/api/directions/json");
@@ -170,6 +264,15 @@ export class GoogleTransitDirectionsClient {
     url.searchParams.set("mode", "transit");
     url.searchParams.set("departure_time", String(departureTime));
     url.searchParams.set("alternatives", "true");
+    if (options?.routingPreference) {
+      url.searchParams.set("transit_routing_preference", options.routingPreference);
+    }
+    if (options?.transitMode) {
+      url.searchParams.set("transit_mode", options.transitMode);
+    }
+    if (options?.waypoint) {
+      url.searchParams.set("waypoints", options.waypoint);
+    }
     url.searchParams.set("language", "da");
     url.searchParams.set("region", "dk");
     url.searchParams.set("key", key);
@@ -185,40 +288,83 @@ export class GoogleTransitDirectionsClient {
       throw new GoogleTransitDirectionsError(msg, { status: data.status, kind: "generic" });
     }
 
-    return data.routes.map((route) => this.routeToBundle(route));
+    return data;
   }
 
-  private routeToBundle(route: GoogleRoute): TransitTripBundle {
+  private mergeBundles(
+    settled: Array<PromiseSettledResult<TransitTripBundle[]>>
+  ): TransitTripBundle[] {
+    const merged: TransitTripBundle[] = [];
+    const seen = new Set<string>();
+    for (const outcome of settled) {
+      if (outcome.status !== "fulfilled") continue;
+      for (const bundle of outcome.value) {
+        const key = bundle.trip.legs
+          .map((leg) => `${leg.mode}:${leg.line}:${leg.departureStop}:${leg.arrivalStop}:${leg.instructions ?? ""}`)
+          .join("|");
+        if (seen.has(key)) continue;
+        seen.add(key);
+        merged.push(bundle);
+      }
+    }
+    if (merged.length === 0) {
+      const firstFailure = settled.find((o) => o.status === "rejected");
+      if (firstFailure && firstFailure.status === "rejected") {
+        throw firstFailure.reason;
+      }
+    }
+    return merged.sort((a, b) => a.durationSeconds - b.durationSeconds);
+  }
+
+  private routeToBundle(route: GoogleRoute, options?: DirectionsQueryOptions): TransitTripBundle {
     const steps = route.legs.flatMap((l) => l.steps ?? []);
     const transitSteps = steps.filter((s) => s.travel_mode === "TRANSIT" && s.transit_details);
+    const legs: TransitLeg[] = [];
 
-    const legs: Leg[] = transitSteps.map((step) => {
-      const td = step.transit_details!;
+    for (const step of steps) {
+      if (step.travel_mode === "WALK") {
+        const instructions = stripHtml(step.html_instructions ?? "Gang");
+        const durationMinutes = Math.max(1, Math.round((step.duration?.value ?? 0) / 60));
+        const walkDistanceMeters = step.distance?.value;
+        legs.push({
+          mode: "WALK",
+          line: "Gang",
+          departureStop: instructions,
+          arrivalStop: instructions,
+          durationMinutes,
+          walkDistanceMeters,
+          walkDistanceText: step.distance?.text,
+          instructions
+        });
+        continue;
+      }
+      if (step.travel_mode !== "TRANSIT" || !step.transit_details) {
+        continue;
+      }
+      const td = step.transit_details;
       const dep = td.departure_time?.value;
       const arr = td.arrival_time?.value;
       const depStr = typeof dep === "number" ? formatCopenhagenTime(dep) : undefined;
       const arrStr = typeof arr === "number" ? formatCopenhagenTime(arr) : undefined;
       const lineName = td.line?.short_name || td.line?.name || "Transit";
       const headsign = td.headsign ?? "";
-      const note = `${lineName}${headsign ? ` · ${headsign}` : ""}`.trim();
-      return {
-        Origin: {
-          name: td.departure_stop.name,
-          time: depStr,
-          rtTime: depStr
-        },
-        Destination: {
-          name: td.arrival_stop.name,
-          time: arrStr,
-          rtTime: arrStr
-        },
-        Notes: {
-          Note: [{ value: note }]
-        },
-        rtDepartureTime: depStr,
-        rtArrivalTime: arrStr
-      };
-    });
+      const durationMinutes = Math.max(1, Math.round((step.duration?.value ?? 0) / 60));
+      const mode = mapVehicleType(td.vehicle?.type, lineName, headsign);
+      const instructions = stripHtml(step.html_instructions ?? "");
+      legs.push({
+        mode,
+        line: lineName,
+        departureStop: td.departure_stop.name,
+        arrivalStop: td.arrival_stop.name,
+        durationMinutes,
+        departureTime: depStr,
+        arrivalTime: arrStr,
+        headsign,
+        departurePlatform: parsePlatform(instructions),
+        instructions,
+        hasLiveTiming: Boolean(depStr || arrStr)
+      });
+    }
 
     if (legs.length === 0 && route.legs[0]) {
       const gLeg = route.legs[0];
@@ -226,22 +372,21 @@ export class GoogleTransitDirectionsClient {
       const dep = gLeg.departure_time?.value;
       const depStr = typeof dep === "number" ? formatCopenhagenTime(dep) : undefined;
       const arrStr = typeof arr === "number" ? formatCopenhagenTime(arr) : undefined;
+      const durationMinutes = Math.max(1, Math.round((gLeg.duration?.value ?? 0) / 60));
       legs.push({
-        Origin: { name: gLeg.start_address, time: depStr, rtTime: depStr },
-        Destination: { name: gLeg.end_address, time: arrStr, rtTime: arrStr },
-        Notes: {
-          Note: [{ value: "Gang / lokal transport (Google)" }]
-        },
-        rtDepartureTime: depStr,
-        rtArrivalTime: arrStr
+        mode: "WALK",
+        line: "Gang",
+        departureStop: gLeg.start_address,
+        arrivalStop: gLeg.end_address,
+        durationMinutes,
+        departureTime: depStr,
+        arrivalTime: arrStr
       });
     }
 
-    const journeyName = transitSteps
-      .map((s) => {
-        const td = s.transit_details!;
-        return td.line?.short_name || td.line?.name || "";
-      })
+    const journeyName = legs
+      .filter((leg) => leg.mode !== "WALK")
+      .map((leg) => leg.line)
       .filter(Boolean)
       .join(" → ");
 
@@ -283,12 +428,13 @@ export class GoogleTransitDirectionsClient {
     }
 
     return {
-      trip: { Leg: legs.length === 1 ? legs[0] : legs },
+      trip: { legs },
       mapCoordinates,
       journeyName: journeyName || undefined,
       durationSeconds,
       durationSummary,
-      warnings
+      warnings,
+      routingPreference: options?.routingPreference
     };
   }
 }
